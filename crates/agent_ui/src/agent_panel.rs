@@ -2673,7 +2673,7 @@ impl rules_library::InlineAssistDelegate for PromptLibraryInlineAssist {
                 initial_prompt,
                 window,
                 cx,
-            )
+            );
         })
     }
 
