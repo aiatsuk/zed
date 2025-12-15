@@ -789,68 +789,21 @@ impl Default for SmoothCaretSetting {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CursorVfxModeContent {
-    /// No particle effects
+    /// No visual effects
     #[default]
     None,
-    /// Line of particles along movement path with spiral/curl effect
-    Railgun,
-    /// Dense particle stream in movement direction
-    Torpedo,
-    /// Scattered sparkle particles that drift and fall
-    Pixiedust,
     /// Burst effect at cursor stop point
     Sonicboom,
-    /// Concentric rings at cursor stop point
-    Ripple,
-    /// Geometric outline effect at cursor stop point
-    Wireframe,
 }
 
-/// Cursor visual effects settings for particle animations.
-/// Enables visual effects like particle trails and bursts when the cursor moves.
+/// Cursor visual effects settings.
 #[with_fallible_options]
 #[derive(Clone, Default, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
 pub struct CursorVfxContent {
-    /// Visual effect mode. Set to "none" to disable effects.
+    /// Visual effect mode. Set to "none" to disable effects, or "sonicboom" for burst effect.
     ///
     /// Default: none
     pub mode: Option<CursorVfxModeContent>,
-
-    /// Opacity of the particles (0-255).
-    ///
-    /// Default: 200
-    #[schemars(range(min = 0.0, max = 255.0))]
-    pub opacity: Option<f32>,
-
-    /// How long particles live in seconds.
-    ///
-    /// Default: 0.5
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub particle_lifetime: Option<f32>,
-
-    /// Particles spawned per pixel of cursor movement.
-    ///
-    /// Default: 0.7
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub particle_density: Option<f32>,
-
-    /// Speed of particle movement.
-    ///
-    /// Default: 10.0
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub particle_speed: Option<f32>,
-
-    /// Phase offset for railgun spiral effect.
-    ///
-    /// Default: 1.5
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub particle_phase: Option<f32>,
-
-    /// Curl amount for railgun spiral effect.
-    ///
-    /// Default: 1.0
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub particle_curl: Option<f32>,
 }
 
 /// What to do when go to definition yields no results.

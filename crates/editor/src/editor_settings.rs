@@ -228,57 +228,22 @@ impl SmoothCaret {
     }
 }
 
-/// Runtime settings for cursor visual effects (particle animations).
-#[derive(Copy, Clone, Debug, PartialEq)]
+/// Runtime settings for cursor visual effects.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct CursorVfx {
-    /// Visual effect mode.
     pub mode: CursorVfxMode,
-    /// Opacity of the particles (0-255).
-    pub opacity: f32,
-    /// How long particles live in seconds.
-    pub particle_lifetime: f32,
-    /// Particles spawned per pixel of cursor movement.
-    pub particle_density: f32,
-    /// Speed of particle movement.
-    pub particle_speed: f32,
-    /// Phase offset for spiral effects.
-    pub particle_phase: f32,
-    /// Curl amount for spiral effects.
-    pub particle_curl: f32,
-}
-
-impl Default for CursorVfx {
-    fn default() -> Self {
-        Self {
-            mode: CursorVfxMode::None,
-            opacity: 200.0,
-            particle_lifetime: 0.5,
-            particle_density: 0.7,
-            particle_speed: 10.0,
-            particle_phase: 1.5,
-            particle_curl: 1.0,
-        }
-    }
 }
 
 impl CursorVfx {
-    /// Parse from the settings content.
     pub fn from_setting(setting: Option<CursorVfxContent>) -> Self {
-        match setting {
-            Some(config) => Self {
-                mode: config.mode.map(Into::into).unwrap_or(CursorVfxMode::None),
-                opacity: config.opacity.unwrap_or(200.0).clamp(0.0, 255.0),
-                particle_lifetime: config.particle_lifetime.unwrap_or(0.5),
-                particle_density: config.particle_density.unwrap_or(0.7),
-                particle_speed: config.particle_speed.unwrap_or(10.0),
-                particle_phase: config.particle_phase.unwrap_or(1.5),
-                particle_curl: config.particle_curl.unwrap_or(1.0),
-            },
-            None => Self::default(),
+        Self {
+            mode: setting
+                .and_then(|c| c.mode)
+                .map(Into::into)
+                .unwrap_or(CursorVfxMode::None),
         }
     }
 
-    /// Returns true if any VFX effect is enabled.
     pub fn is_enabled(&self) -> bool {
         self.mode != CursorVfxMode::None
     }
@@ -288,12 +253,7 @@ impl From<CursorVfxModeContent> for CursorVfxMode {
     fn from(mode: CursorVfxModeContent) -> Self {
         match mode {
             CursorVfxModeContent::None => CursorVfxMode::None,
-            CursorVfxModeContent::Railgun => CursorVfxMode::Railgun,
-            CursorVfxModeContent::Torpedo => CursorVfxMode::Torpedo,
-            CursorVfxModeContent::Pixiedust => CursorVfxMode::Pixiedust,
             CursorVfxModeContent::Sonicboom => CursorVfxMode::Sonicboom,
-            CursorVfxModeContent::Ripple => CursorVfxMode::Ripple,
-            CursorVfxModeContent::Wireframe => CursorVfxMode::Wireframe,
         }
     }
 }
