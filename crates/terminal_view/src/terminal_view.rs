@@ -251,8 +251,8 @@ impl TerminalView {
         });
 
         // Initialize smooth cursor animation based on editor's smooth_caret setting
-        let smooth_caret_enabled = EditorSettings::get_global(cx).smooth_caret;
-        let config = Self::build_inertial_cursor_config(smooth_caret_enabled);
+        let smooth_caret_settings = &EditorSettings::get_global(cx).smooth_caret;
+        let config = Self::build_inertial_cursor_config(smooth_caret_settings);
         let quad_cursor = if config.enabled {
             Some(QuadCursor::new(
                 config,
@@ -298,12 +298,8 @@ impl TerminalView {
         }
     }
 
-    fn build_inertial_cursor_config(enabled: bool) -> InertialCursorConfig {
-        if enabled {
-            InertialCursorConfig::from_mode(settings::SmoothCaretMode::On)
-        } else {
-            InertialCursorConfig::from_mode(settings::SmoothCaretMode::Off)
-        }
+    fn build_inertial_cursor_config(settings: &editor::SmoothCaret) -> InertialCursorConfig {
+        InertialCursorConfig::from_settings(settings)
     }
 
     pub fn quad_cursor(&self) -> Option<&QuadCursor> {
@@ -525,6 +521,26 @@ impl TerminalView {
         if breadcrumb_visibility_changed {
             cx.emit(ItemEvent::UpdateBreadcrumbs);
         }
+
+        // Handle smooth_caret settings changes
+        let editor_settings = EditorSettings::get_global(cx);
+        let new_smooth_caret_config =
+            Self::build_inertial_cursor_config(&editor_settings.smooth_caret);
+        if new_smooth_caret_config.enabled {
+            if let Some(cursor) = &mut self.quad_cursor {
+                cursor.set_config(new_smooth_caret_config);
+            } else {
+                self.quad_cursor = Some(QuadCursor::new(
+                    new_smooth_caret_config,
+                    gpui::point(gpui::Pixels::ZERO, gpui::Pixels::ZERO),
+                    10.0,
+                    20.0,
+                ));
+            }
+        } else {
+            self.quad_cursor = None;
+        }
+
         cx.notify();
     }
 

@@ -22,11 +22,26 @@ pub struct EditorSettingsContent {
     ///
     /// Default: bar
     pub cursor_shape: Option<CursorShape>,
-    /// Enable smooth cursor animation.
-    /// When true, cursor animates smoothly between positions and blinks with opacity fade.
+    /// Smooth cursor animation settings.
+    /// Can be a boolean (true/false) for simple enable/disable,
+    /// or an object for detailed configuration:
+    /// ```json
+    /// {
+    ///   "enabled": true,
+    ///   "animation_time_ms": 150,
+    ///   "short_animation_time_ms": 25,
+    ///   "trail_size": 1.0,
+    ///   "animate_in_insert_mode": true
+    /// }
+    /// ```
     ///
     /// Default: true
-    pub smooth_caret: Option<bool>,
+    pub smooth_caret: Option<SmoothCaretSetting>,
+    /// Cursor visual effects (particle animations).
+    /// Enables effects like particle trails when cursor moves.
+    ///
+    /// Default: mode is "none" (disabled)
+    pub cursor_vfx: Option<CursorVfxContent>,
     /// Determines when the mouse cursor should be hidden in an editor or input box.
     ///
     /// Default: on_typing_and_movement
@@ -700,6 +715,142 @@ pub enum SmoothCaretMode {
     /// Smooth animation with critically damped spring physics (150ms, trail_size=1.0)
     #[default]
     On,
+}
+
+/// Detailed smooth cursor animation settings.
+/// Allows fine-grained control over cursor animation behavior.
+#[with_fallible_options]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct SmoothCaretContent {
+    /// Whether smooth cursor animation is enabled.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+
+    /// Animation duration for large jumps (search, goto) in milliseconds.
+    ///
+    /// Default: 150
+    pub animation_time_ms: Option<u64>,
+
+    /// Animation duration for small moves (typing) in milliseconds.
+    ///
+    /// Default: 25
+    pub short_animation_time_ms: Option<u64>,
+
+    /// Trail size controls cursor responsiveness vs smoothness:
+    /// - 1.0 = Leading edge snaps instantly (minimum latency, maximum responsiveness)
+    /// - 0.5 = Balanced animation
+    /// - 0.0 = Full smooth animation (maximum smoothness, more perceived latency)
+    ///
+    /// Default: 1.0
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub trail_size: Option<f32>,
+
+    /// Whether to animate cursor during insert mode (typing).
+    /// When false, cursor snaps instantly for short horizontal movements.
+    ///
+    /// Default: true
+    pub animate_in_insert_mode: Option<bool>,
+}
+
+/// Smooth cursor setting that supports both simple boolean and detailed configuration.
+/// This enables backwards compatibility with existing `"smooth_caret": true/false` settings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(untagged)]
+pub enum SmoothCaretSetting {
+    /// Simple boolean for backwards compatibility
+    Bool(bool),
+    /// Detailed configuration object
+    Config(SmoothCaretContent),
+}
+
+impl Default for SmoothCaretSetting {
+    fn default() -> Self {
+        SmoothCaretSetting::Bool(true)
+    }
+}
+
+/// Cursor visual effect mode for particle animations.
+/// Provides enhanced visual feedback during cursor movement.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorVfxModeContent {
+    /// No particle effects
+    #[default]
+    None,
+    /// Line of particles along movement path with spiral/curl effect
+    Railgun,
+    /// Dense particle stream in movement direction
+    Torpedo,
+    /// Scattered sparkle particles that drift and fall
+    Pixiedust,
+    /// Burst effect at cursor stop point
+    Sonicboom,
+    /// Concentric rings at cursor stop point
+    Ripple,
+    /// Geometric outline effect at cursor stop point
+    Wireframe,
+}
+
+/// Cursor visual effects settings for particle animations.
+/// Enables visual effects like particle trails and bursts when the cursor moves.
+#[with_fallible_options]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct CursorVfxContent {
+    /// Visual effect mode. Set to "none" to disable effects.
+    ///
+    /// Default: none
+    pub mode: Option<CursorVfxModeContent>,
+
+    /// Opacity of the particles (0-255).
+    ///
+    /// Default: 200
+    #[schemars(range(min = 0.0, max = 255.0))]
+    pub opacity: Option<f32>,
+
+    /// How long particles live in seconds.
+    ///
+    /// Default: 0.5
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub particle_lifetime: Option<f32>,
+
+    /// Particles spawned per pixel of cursor movement.
+    ///
+    /// Default: 0.7
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub particle_density: Option<f32>,
+
+    /// Speed of particle movement.
+    ///
+    /// Default: 10.0
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub particle_speed: Option<f32>,
+
+    /// Phase offset for railgun spiral effect.
+    ///
+    /// Default: 1.5
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub particle_phase: Option<f32>,
+
+    /// Curl amount for railgun spiral effect.
+    ///
+    /// Default: 1.0
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub particle_curl: Option<f32>,
 }
 
 /// What to do when go to definition yields no results.

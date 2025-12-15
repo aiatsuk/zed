@@ -56,8 +56,8 @@ pub use cursor_vfx::{CursorVfxConfig, CursorVfxSystem};
 pub use display_map::{ChunkRenderer, ChunkRendererContext, DisplayPoint, FoldPlaceholder};
 pub use edit_prediction_types::Direction;
 pub use editor_settings::{
-    CurrentLineHighlight, DocumentColorsRenderMode, EditorSettings, HideMouseMode,
-    ScrollBeyondLastLine, ScrollbarAxes, SearchSettings, ShowMinimap,
+    CurrentLineHighlight, CursorVfx, DocumentColorsRenderMode, EditorSettings, HideMouseMode,
+    ScrollBeyondLastLine, ScrollbarAxes, SearchSettings, ShowMinimap, SmoothCaret,
 };
 pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
@@ -2283,8 +2283,8 @@ impl Editor {
                 .unwrap_or_default(),
             cursor_offset_on_selection: false,
             quad_cursor: {
-                let smooth_caret = EditorSettings::get_global(cx).smooth_caret;
-                let config = Self::build_inertial_cursor_config(smooth_caret);
+                let smooth_caret_settings = &EditorSettings::get_global(cx).smooth_caret;
+                let config = Self::build_inertial_cursor_config(smooth_caret_settings);
                 if config.enabled {
                     Some(inertial_cursor::QuadCursor::new(
                         config,
@@ -2297,7 +2297,15 @@ impl Editor {
                 }
             },
             cursor_animation_ticker: inertial_cursor::CursorAnimationTicker::new(),
-            cursor_vfx_system: None,
+            cursor_vfx_system: {
+                let vfx_settings = &EditorSettings::get_global(cx).cursor_vfx;
+                let vfx_config = cursor_vfx::CursorVfxConfig::from_runtime_settings(vfx_settings);
+                if vfx_config.is_enabled() {
+                    Some(cursor_vfx::CursorVfxSystem::new(vfx_config))
+                } else {
+                    None
+                }
+            },
             current_line_highlight: None,
             autoindent_mode: Some(AutoindentMode::EachLine),
             collapse_matches: false,
@@ -3128,12 +3136,10 @@ impl Editor {
         self.quad_cursor.as_mut()
     }
 
-    fn build_inertial_cursor_config(enabled: bool) -> inertial_cursor::InertialCursorConfig {
-        if enabled {
-            inertial_cursor::InertialCursorConfig::from_mode(settings::SmoothCaretMode::On)
-        } else {
-            inertial_cursor::InertialCursorConfig::from_mode(settings::SmoothCaretMode::Off)
-        }
+    fn build_inertial_cursor_config(
+        settings: &editor_settings::SmoothCaret,
+    ) -> inertial_cursor::InertialCursorConfig {
+        inertial_cursor::InertialCursorConfig::from_settings(settings)
     }
 
     pub fn is_cursor_animating(&self) -> bool {
@@ -22310,6 +22316,37 @@ impl Editor {
             self.show_breadcrumbs = editor_settings.toolbar.breadcrumbs;
             self.cursor_shape = editor_settings.cursor_shape.unwrap_or_default();
             self.hide_mouse_mode = editor_settings.hide_mouse.unwrap_or_default();
+
+            // Handle smooth_caret settings changes
+            let new_smooth_caret_config =
+                Self::build_inertial_cursor_config(&editor_settings.smooth_caret);
+            if new_smooth_caret_config.enabled {
+                if let Some(cursor) = &mut self.quad_cursor {
+                    cursor.set_config(new_smooth_caret_config);
+                } else {
+                    self.quad_cursor = Some(inertial_cursor::QuadCursor::new(
+                        new_smooth_caret_config,
+                        gpui::point(gpui::Pixels::ZERO, gpui::Pixels::ZERO),
+                        10.0,
+                        20.0,
+                    ));
+                }
+            } else {
+                self.quad_cursor = None;
+            }
+
+            // Handle cursor_vfx settings changes
+            let vfx_config =
+                cursor_vfx::CursorVfxConfig::from_runtime_settings(&editor_settings.cursor_vfx);
+            if vfx_config.is_enabled() {
+                if let Some(vfx) = &mut self.cursor_vfx_system {
+                    vfx.set_config(vfx_config);
+                } else {
+                    self.cursor_vfx_system = Some(cursor_vfx::CursorVfxSystem::new(vfx_config));
+                }
+            } else {
+                self.cursor_vfx_system = None;
+            }
         }
 
         if old_cursor_shape != self.cursor_shape {

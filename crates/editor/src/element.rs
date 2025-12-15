@@ -6863,6 +6863,22 @@ impl EditorElement {
         for cursor in &mut layout.visible_cursors {
             cursor.paint(layout.content_origin, window, cx);
         }
+
+        // Paint cursor VFX particles if enabled
+        if let Some(vfx_system) = self.editor.read(cx).cursor_vfx_system() {
+            // Use the cursor color from the first visible cursor, or fallback to white
+            let cursor_color = layout
+                .visible_cursors
+                .first()
+                .map(|c| c.color)
+                .unwrap_or(gpui::Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 1.0,
+                    a: 1.0,
+                });
+            vfx_system.paint(layout.content_origin, window, cursor_color);
+        }
     }
 
     fn paint_scrollbars(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {

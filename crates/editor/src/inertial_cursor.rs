@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use gpui::{Pixels, Point, point};
 use settings::SmoothCaretMode;
 
+use crate::editor_settings::SmoothCaret;
+
 /// Maximum animation step to prevent large jumps (~8.3ms at 120Hz)
 /// This ensures smooth animation even when frames are skipped.
 pub const MAX_ANIMATION_DT: f32 = 1.0 / 120.0;
@@ -232,6 +234,28 @@ impl InertialCursorConfig {
                 trail_size: 1.0,
                 animate_in_insert_mode: true,
             },
+        }
+    }
+
+    /// Create configuration from editor settings.
+    /// This allows full customization of animation parameters.
+    pub fn from_settings(settings: &SmoothCaret) -> Self {
+        if !settings.enabled {
+            return Self {
+                enabled: false,
+                animation_time: Duration::from_millis(0),
+                short_animation_time: Duration::from_millis(0),
+                trail_size: 0.0,
+                animate_in_insert_mode: true,
+            };
+        }
+
+        Self {
+            enabled: true,
+            animation_time: Duration::from_millis(settings.animation_time_ms),
+            short_animation_time: Duration::from_millis(settings.short_animation_time_ms),
+            trail_size: settings.trail_size.clamp(0.0, 1.0),
+            animate_in_insert_mode: settings.animate_in_insert_mode,
         }
     }
 }

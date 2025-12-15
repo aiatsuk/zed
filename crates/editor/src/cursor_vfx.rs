@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{Bounds, Hsla, Pixels, Point, Window, point, size};
 
+use crate::editor_settings::CursorVfx;
+
 /// Cursor visual effect mode for particle animations.
 /// Provides enhanced visual feedback during cursor movement.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -86,6 +88,20 @@ impl CursorVfxConfig {
 
     pub fn is_enabled(&self) -> bool {
         self.mode != CursorVfxMode::None
+    }
+
+    /// Create configuration from runtime settings.
+    pub fn from_runtime_settings(settings: &CursorVfx) -> Self {
+        Self {
+            mode: settings.mode,
+            opacity: settings.opacity.clamp(0.0, 255.0),
+            particle_lifetime: Duration::from_secs_f32(settings.particle_lifetime),
+            highlight_lifetime: Duration::from_secs_f32(DEFAULT_HIGHLIGHT_LIFETIME),
+            particle_density: settings.particle_density,
+            particle_speed: settings.particle_speed,
+            particle_phase: settings.particle_phase,
+            particle_curl: settings.particle_curl,
+        }
     }
 }
 
