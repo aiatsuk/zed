@@ -6,6 +6,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{Pixels, Point, point};
+#[cfg(test)]
 use settings::SmoothCaretMode;
 
 use crate::editor_settings::SmoothCaret;
@@ -13,6 +14,10 @@ use crate::editor_settings::SmoothCaret;
 /// Maximum animation step to prevent large jumps (~8.3ms at 120Hz)
 /// This ensures smooth animation even when frames are skipped.
 pub const MAX_ANIMATION_DT: f32 = 1.0 / 120.0;
+
+/// Fixed timestep for physics simulation (120Hz).
+/// Physics always runs at this rate; rendering interpolates between states.
+const PHYSICS_DT: f32 = 1.0 / 120.0;
 
 /// Distance threshold (in pixels) above which cursor snaps immediately.
 /// Prevents excessive stretching during very large jumps (e.g., search, goto).
@@ -30,22 +35,17 @@ const SPRING_CONVERGENCE_THRESHOLD: f32 = 0.01;
 // Cursor Animation Ticker (Frame Pacing)
 // ============================================================================
 
-/// Centralized frame pacing for cursor animations.
-/// This handles the catchup mechanism to ensure smooth animation
-/// even when frame intervals are uneven.
+/// Simple frame pacing for cursor animations.
+/// Uses actual wall-clock delta for smooth, drift-free animation.
 ///
 /// Usage:
-/// 1. Call `tick(now)` at the start of each frame to get the smoothed dt
+/// 1. Call `tick(now)` at the start of each frame to get dt
 /// 2. Pass that dt to cursor's `update_physics(dt)`
 /// 3. Call `stop()` when animation finishes
 #[derive(Debug, Clone)]
 pub struct CursorAnimationTicker {
-    /// When the current animation period started.
-    animation_start: Instant,
-    /// How much animation time has been simulated (virtual time).
-    animation_time: Duration,
-    /// Expected frame duration based on display refresh rate (~8.3ms for 120Hz).
-    expected_frame_duration: Duration,
+    /// Last tick timestamp for delta calculation.
+    last_tick: Option<Instant>,
     /// Whether we're currently in an animation period.
     is_animating: bool,
 }
@@ -57,63 +57,40 @@ impl Default for CursorAnimationTicker {
 }
 
 impl CursorAnimationTicker {
-    /// Default expected frame duration (120Hz).
-    const DEFAULT_FRAME_DURATION: Duration = Duration::from_micros(8333);
+    /// Maximum dt to prevent huge jumps (e.g., after sleep/tab switch).
+    /// Caps at ~20fps minimum.
+    const MAX_DT: Duration = Duration::from_millis(50);
+
+    /// Default dt for first frame (~120Hz).
+    const DEFAULT_FIRST_FRAME_DT: Duration = Duration::from_millis(8);
 
     pub fn new() -> Self {
         Self {
-            animation_start: Instant::now(),
-            animation_time: Duration::ZERO,
-            expected_frame_duration: Self::DEFAULT_FRAME_DURATION,
+            last_tick: None,
             is_animating: false,
         }
     }
 
-    /// Set the expected frame duration from refresh rate in Hz.
-    pub fn set_refresh_rate(&mut self, hz: f32) {
-        if hz > 0.0 {
-            self.expected_frame_duration = Duration::from_secs_f32(1.0 / hz);
-        }
-    }
-
-    /// The dt is smoothed using a catchup mechanism:
-    /// - If behind by 1+ frames, catch up immediately
-    /// - If behind by less, spread catchup over 10 frames
+    /// Get the time delta since last tick.
+    /// Returns actual wall-clock delta, capped to prevent huge jumps.
     pub fn tick(&mut self, now: Instant) -> Duration {
-        if !self.is_animating {
-            self.animation_start = now;
-            self.animation_time = Duration::ZERO;
-            self.is_animating = true;
-        }
-
-        // Calculate target animation time (wall clock since animation start)
-        let target_time = now.saturating_duration_since(self.animation_start);
-        let mut delta = target_time.saturating_sub(self.animation_time);
-
-        // Protection against huge jumps (e.g., switching tabs, laptop sleep)
-        if delta > Duration::from_millis(500) {
-            self.animation_start = now;
-            self.animation_time = Duration::ZERO;
-            delta = self.expected_frame_duration;
-        }
-
-        // Smooth catchup mechanism for consistent frame pacing.
-        // If behind by 1+ frames, catch up immediately.
-        // If less, spread catchup over 10 frames for smoothness.
-        let catchup = if delta >= self.expected_frame_duration {
-            delta
-        } else {
-            Duration::from_secs_f64(delta.as_secs_f64() / 10.0)
+        let dt = match self.last_tick {
+            Some(last) => {
+                let elapsed = now.saturating_duration_since(last);
+                elapsed.min(Self::MAX_DT)
+            }
+            None => {
+                self.is_animating = true;
+                Self::DEFAULT_FIRST_FRAME_DT
+            }
         };
-
-        let dt = self.expected_frame_duration + catchup;
-        self.animation_time += dt;
-
+        self.last_tick = Some(now);
         dt
     }
 
     pub fn stop(&mut self) {
         self.is_animating = false;
+        self.last_tick = None;
     }
 
     pub fn is_animating(&self) -> bool {
@@ -191,7 +168,9 @@ impl SpringAnimation {
     }
 
     pub fn is_complete(&self) -> bool {
+        // Check both position and velocity to prevent oscillation at threshold
         self.position.abs() < SPRING_CONVERGENCE_THRESHOLD
+            && self.velocity.abs() < 0.1
     }
 }
 
@@ -218,6 +197,7 @@ pub struct InertialCursorConfig {
 impl InertialCursorConfig {
     /// Create configuration from a SmoothCaretMode preset.
     /// All presets use QuadCorner animation with critically damped springs.
+    #[cfg(test)]
     pub fn from_mode(mode: SmoothCaretMode) -> Self {
         match mode {
             SmoothCaretMode::Off => Self {
@@ -262,7 +242,13 @@ impl InertialCursorConfig {
 
 impl Default for InertialCursorConfig {
     fn default() -> Self {
-        Self::from_mode(SmoothCaretMode::On)
+        Self {
+            enabled: true,
+            animation_time: Duration::from_millis(150),
+            short_animation_time: Duration::from_millis(25),
+            trail_size: 1.0,
+            animate_in_insert_mode: true,
+        }
     }
 }
 
@@ -496,6 +482,9 @@ impl AnimatedCorner {
 /// Each corner animates independently based on movement direction.
 /// Architecture: corner positions recalculated every frame with
 /// current cell dimensions.
+///
+/// Uses fixed-timestep physics (120Hz) with interpolation for smooth
+/// rendering at any frame rate.
 #[derive(Debug, Clone)]
 pub struct QuadCursor {
     /// The 4 corners of the cursor quad (each with independent X/Y springs)
@@ -504,13 +493,15 @@ pub struct QuadCursor {
     logical_center: Vec2,
     /// Animation configuration
     config: InertialCursorConfig,
-    /// Last frame's delta time (for VFX)
-    last_frame_dt: f32,
     /// Whether cursor jumped this frame (triggers animation_length calculation)
     jumped: bool,
     /// Current cell dimensions (set immediately, no animation)
     cell_width: f32,
     cell_height: f32,
+    /// Corner positions at last physics tick (for interpolation)
+    previous_corner_positions: [Vec2; 4],
+    /// Accumulated time for fixed-timestep physics
+    physics_accumulator: f32,
 }
 
 impl QuadCursor {
@@ -535,14 +526,23 @@ impl QuadCursor {
             corner.init_position(top_left, cell_width, cell_height);
         }
 
+        // Initialize previous positions to current positions
+        let previous_corner_positions = [
+            corners[0].position(),
+            corners[1].position(),
+            corners[2].position(),
+            corners[3].position(),
+        ];
+
         Self {
             corners,
             logical_center: top_left,
             config,
-            last_frame_dt: 1.0 / 120.0,
             jumped: false,
             cell_width,
             cell_height,
+            previous_corner_positions,
+            physics_accumulator: 0.0,
         }
     }
 
@@ -681,31 +681,19 @@ impl QuadCursor {
         }
     }
 
-    pub fn logical_pos(&self) -> Point<Pixels> {
-        self.logical_center.to_point()
-    }
-
-    pub fn corner_positions(&self) -> [Point<Pixels>; 4] {
-        [
-            self.corners[0].position().to_point(),
-            self.corners[1].position().to_point(),
-            self.corners[2].position().to_point(),
-            self.corners[3].position().to_point(),
-        ]
-    }
-
     pub fn visual_pos(&self) -> Point<Pixels> {
         self.corners[0].position().to_point()
-    }
-
-    pub fn last_frame_dt(&self) -> f32 {
-        self.last_frame_dt
     }
 
     pub fn snap_to_logical(&mut self) {
         for corner in &mut self.corners {
             corner.init_position(self.logical_center, self.cell_width, self.cell_height);
         }
+        // Reset interpolation state
+        for (i, corner) in self.corners.iter().enumerate() {
+            self.previous_corner_positions[i] = corner.position();
+        }
+        self.physics_accumulator = 0.0;
     }
 
     pub fn is_animating(&self) -> bool {
@@ -717,32 +705,62 @@ impl QuadCursor {
         self.jumped || self.corners.iter().any(|c| !c.is_complete())
     }
 
-    /// Update physics with a given delta time.
-    /// This is the core animation logic called by tick_cursor_animations().
-    /// Returns `true` if visual position changed.
+    /// Update physics with a given frame delta time.
+    /// Uses fixed-timestep simulation (120Hz) for deterministic behavior.
+    /// Returns `true` if still animating.
     ///
     /// CRITICAL architecture:
-    /// - corner.update() receives CURRENT (cell_width, cell_height) and center
-    /// - corner_destination is recalculated INSIDE update() with fresh values
-    /// - This ensures smooth animation even when cell size changes
-    pub fn update_physics(&mut self, dt: f32) -> bool {
-        let mut changed = false;
+    /// - Physics runs at fixed PHYSICS_DT (120Hz) for consistency
+    /// - Accumulates frame_dt and steps multiple times if needed
+    /// - Stores previous positions for interpolation
+    /// - Rendering uses interpolated_corner_positions() for smooth visuals
+    pub fn update_physics(&mut self, frame_dt: f32) -> bool {
+        self.physics_accumulator += frame_dt;
 
-        // Pass current dimensions to each corner's update()
-        // Each corner recalculates its destination with fresh values
+        let mut still_animating = false;
         let cursor_dimensions = (self.cell_width, self.cell_height);
         let center = self.logical_center;
-        let immediate_movement = false; // Only true for animate_in_insert_mode=false
+        let immediate_movement = !self.config.enabled;
 
-        for corner in &mut self.corners {
-            if corner.update(cursor_dimensions, center, dt, immediate_movement) {
-                changed = true;
+        // Run fixed-timestep physics loop
+        while self.physics_accumulator >= PHYSICS_DT {
+            // Store previous positions BEFORE stepping physics
+            for (i, corner) in self.corners.iter().enumerate() {
+                self.previous_corner_positions[i] = corner.position();
             }
+
+            // Step physics with fixed dt
+            for corner in &mut self.corners {
+                if corner.update(cursor_dimensions, center, PHYSICS_DT, immediate_movement) {
+                    still_animating = true;
+                }
+            }
+
+            self.physics_accumulator -= PHYSICS_DT;
+            self.jumped = false;
         }
 
-        self.jumped = false;
+        still_animating
+    }
 
-        changed
+    /// Get interpolation alpha (0.0-1.0) for smooth rendering between physics ticks.
+    pub fn interpolation_alpha(&self) -> f32 {
+        (self.physics_accumulator / PHYSICS_DT).clamp(0.0, 1.0)
+    }
+
+    /// Get interpolated corner positions for rendering.
+    /// Lerps between previous and current physics states based on accumulated time.
+    /// This provides sub-pixel smooth animation at any frame rate.
+    pub fn interpolated_corner_positions(&self) -> [Point<Pixels>; 4] {
+        let alpha = self.interpolation_alpha();
+        std::array::from_fn(|i| {
+            let prev = self.previous_corner_positions[i];
+            let curr = self.corners[i].position();
+            // Linear interpolation
+            let x = prev.x + (curr.x - prev.x) * alpha;
+            let y = prev.y + (curr.y - prev.y) * alpha;
+            point(Pixels::from(x), Pixels::from(y))
+        })
     }
 }
 
@@ -763,8 +781,8 @@ mod tests {
         let changed = cursor.update_physics(0.016); // 16ms delta time
 
         let visual = cursor.visual_pos();
-        let logical = cursor.logical_pos();
-        assert_eq!(f32::from(visual.x), f32::from(logical.x));
+        // With animation disabled, visual should snap to target (100.0)
+        assert_eq!(f32::from(visual.x), 100.0);
         assert!(!changed, "Disabled cursor shouldn't animate");
     }
 

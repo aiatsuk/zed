@@ -1361,11 +1361,6 @@ impl Element for TerminalElement {
                             cursor.paint(origin, window, cx);
                         }
 
-                    // Request animation frame if cursor is animating for smooth updates
-                    if self.terminal_view.read(cx).is_cursor_animating() {
-                        window.request_animation_frame();
-                    }
-
                     if let Some(mut element) = block_below_cursor_element {
                         element.paint(window, cx);
                     }

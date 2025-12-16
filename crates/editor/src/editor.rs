@@ -2379,7 +2379,14 @@ impl Editor {
                         cx.observe(&multi_buffer, Self::on_buffer_changed),
                         cx.subscribe_in(&multi_buffer, window, Self::on_buffer_event),
                         cx.observe_in(&display_map, window, Self::on_display_map_changed),
-                        cx.observe(&blink_manager, |_, _, cx| cx.notify()),
+                        cx.observe(&blink_manager, |editor, _, cx| {
+                            // Skip blink notifications during smooth cursor animation
+                            // to avoid triggering full frame redraws that cause flickering
+                            if editor.is_cursor_animating() {
+                                return;
+                            }
+                            cx.notify()
+                        }),
                         cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
                         observe_buffer_font_size_adjustment(cx, |_, cx| cx.notify()),
                         cx.observe_window_activation(window, |editor, window, cx| {
@@ -3146,12 +3153,6 @@ impl Editor {
         self.quad_cursor.as_ref().is_some_and(|c| c.is_animating())
     }
 
-    pub fn snap_quad_cursor(&mut self) {
-        if let Some(cursor) = &mut self.quad_cursor {
-            cursor.snap_to_logical();
-        }
-    }
-
     pub fn update_quad_cursor_position(&mut self, pos: gpui::Point<gpui::Pixels>) {
         if let Some(cursor) = &mut self.quad_cursor {
             cursor.set_logical_pos(pos);
@@ -3170,10 +3171,6 @@ impl Editor {
 
     pub fn cursor_vfx_system_mut(&mut self) -> Option<&mut cursor_vfx::CursorVfxSystem> {
         self.cursor_vfx_system.as_mut()
-    }
-
-    pub fn set_cursor_refresh_rate(&mut self, hz: f32) {
-        self.cursor_animation_ticker.set_refresh_rate(hz);
     }
 
     pub fn tick_cursor_animations(&mut self) -> bool {
@@ -3209,9 +3206,9 @@ impl Editor {
         still_animating
     }
 
-    pub fn update_cursor_vfx(&mut self, cursor_pos: gpui::Point<gpui::Pixels>, dt: f32) {
+    pub fn update_cursor_vfx(&mut self, cursor_pos: gpui::Point<gpui::Pixels>) {
         if let Some(vfx) = &mut self.cursor_vfx_system {
-            vfx.update(cursor_pos, dt);
+            vfx.update(cursor_pos);
         }
     }
 

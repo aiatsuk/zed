@@ -68,7 +68,11 @@ impl HighlightEffect {
     }
 
     fn normalized_age(&self) -> f32 {
-        (self.birth.elapsed().as_secs_f32() / self.lifetime.as_secs_f32()).min(1.0)
+        let lifetime_secs = self.lifetime.as_secs_f32();
+        if lifetime_secs == 0.0 {
+            return 1.0;
+        }
+        (self.birth.elapsed().as_secs_f32() / lifetime_secs).min(1.0)
     }
 
     fn is_alive(&self) -> bool {
@@ -101,15 +105,11 @@ impl CursorVfxSystem {
         }
     }
 
-    pub fn config(&self) -> &CursorVfxConfig {
-        &self.config
-    }
-
     pub fn is_animating(&self) -> bool {
         !self.highlights.is_empty()
     }
 
-    pub fn update(&mut self, cursor_pos: Point<Pixels>, _dt: f32) {
+    pub fn update(&mut self, cursor_pos: Point<Pixels>) {
         if !self.config.is_enabled() {
             return;
         }
@@ -141,10 +141,6 @@ impl CursorVfxSystem {
                 self.config.mode,
             ));
         }
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.is_animating()
     }
 
     pub fn paint(&self, origin: Point<Pixels>, window: &mut Window, color: Hsla) {
@@ -204,8 +200,8 @@ mod tests {
         let config = CursorVfxConfig::default();
         let mut vfx = CursorVfxSystem::new(config);
 
-        vfx.update(point(Pixels::from(100.0), Pixels::from(100.0)), 0.016);
-        assert!(!vfx.is_active());
+        vfx.update(point(Pixels::from(100.0), Pixels::from(100.0)));
+        assert!(!vfx.is_animating());
     }
 
     #[test]
@@ -214,12 +210,12 @@ mod tests {
         config.mode = CursorVfxMode::Sonicboom;
         let mut vfx = CursorVfxSystem::new(config);
 
-        vfx.update(point(Pixels::from(0.0), Pixels::from(0.0)), 0.016);
-        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)), 0.016);
-        assert!(!vfx.is_active());
+        vfx.update(point(Pixels::from(0.0), Pixels::from(0.0)));
+        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)));
+        assert!(!vfx.is_animating());
 
-        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)), 0.016);
-        assert!(vfx.is_active());
+        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)));
+        assert!(vfx.is_animating());
     }
 
     #[test]
@@ -229,13 +225,13 @@ mod tests {
         config.highlight_lifetime = Duration::from_millis(10);
         let mut vfx = CursorVfxSystem::new(config);
 
-        vfx.update(point(Pixels::from(0.0), Pixels::from(0.0)), 0.016);
-        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)), 0.016);
-        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)), 0.016);
-        assert!(vfx.is_active());
+        vfx.update(point(Pixels::from(0.0), Pixels::from(0.0)));
+        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)));
+        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)));
+        assert!(vfx.is_animating());
 
         std::thread::sleep(Duration::from_millis(20));
-        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)), 0.016);
-        assert!(!vfx.is_active());
+        vfx.update(point(Pixels::from(100.0), Pixels::from(0.0)));
+        assert!(!vfx.is_animating());
     }
 }
