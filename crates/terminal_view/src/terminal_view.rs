@@ -1303,7 +1303,16 @@ impl TerminalView {
             terminal.focus_in();
         });
 
-        self.blink_manager.update(cx, BlinkManager::enable);
+        // Only run the blink timer when blinking is actually enabled; otherwise
+        // it churns wakeups for a cursor that is shown solid.
+        let should_blink = match TerminalSettings::get_global(cx).blinking {
+            TerminalBlink::Off => false,
+            TerminalBlink::On => true,
+            TerminalBlink::TerminalControlled => self.blinking_terminal_enabled,
+        };
+        if should_blink {
+            self.blink_manager.update(cx, BlinkManager::enable);
+        }
 
         window.invalidate_character_coordinates();
         cx.notify();

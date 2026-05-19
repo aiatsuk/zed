@@ -1896,6 +1896,16 @@ impl EditorElement {
                         * ScrollPixelOffset::from(line_height))
                     .into();
 
+                    // The quad cursor animates in document space (independent of
+                    // scroll), so scrolling shifts it rigidly with its line
+                    // instead of spring-animating it. `scroll_offset` converts a
+                    // document-space position back to viewport space for paint.
+                    let document_x = cursor_character_x;
+                    let document_y: Pixels =
+                        (cursor_position.row().as_f64() * ScrollPixelOffset::from(line_height))
+                            .into();
+                    let scroll_offset = point(document_x - logical_x, document_y - logical_y);
+
                     // For the newest (primary) cursor, use inertial animation if enabled
                     // Order: 1) set target 2) tick physics 3) read position
                     // This ensures physics uses the NEW target, eliminating one-frame lag
@@ -1903,13 +1913,18 @@ impl EditorElement {
                         if let Some(quad) = editor.quad_cursor_mut() {
                             quad.set_cell_size(block_width.into(), line_height.into());
                             quad.set_shape(selection.cursor_shape);
-                            // Set target position for animation
-                            quad.set_logical_pos(point(logical_x, logical_y));
+                            // Set target position for animation (document space)
+                            quad.set_logical_pos(point(document_x, document_y));
                             // Physics tick happens in animation callback only (prevents double-tick)
-                            // Use interpolated positions for smooth rendering between physics ticks
-                            let corners = quad.interpolated_corner_positions();
-                            let render_origin =
-                                quad_top_left_or_fallback(Some(corners), quad.visual_pos());
+                            // Use interpolated positions for smooth rendering between physics ticks.
+                            // Corners are document-space; subtract the scroll to paint.
+                            let corners = quad
+                                .interpolated_corner_positions()
+                                .map(|corner| corner - scroll_offset);
+                            let render_origin = quad_top_left_or_fallback(
+                                Some(corners),
+                                quad.visual_pos() - scroll_offset,
+                            );
                             (render_origin.x, render_origin.y, Some(corners))
                         } else {
                             (logical_x, logical_y, None)
@@ -1988,6 +2003,7 @@ impl EditorElement {
                             blink_manager: editor.blink_manager.clone(),
                             content_origin,
                             cursor_pos: point(x, y),
+                            scroll_offset,
                             cursor_color: cursor.color,
                             line_height: cursor.line_height,
                             block_width: cursor.block_width,
@@ -12542,6 +12558,9 @@ struct CursorAnimationState {
     blink_manager: Entity<BlinkManager>,
     content_origin: gpui::Point<Pixels>,
     cursor_pos: gpui::Point<Pixels>,
+    /// Viewport offset of the document origin; subtracted from the quad
+    /// cursor's document-space position to paint it in viewport space.
+    scroll_offset: gpui::Point<Pixels>,
     cursor_color: Hsla,
     line_height: Pixels,
     block_width: Pixels,
@@ -12585,9 +12604,16 @@ fn paint_cursor_animation_frame(
             editor.tick_cursor_animations();
 
             let (origin, quad_corners) = if let Some(quad) = editor.quad_cursor() {
-                let corners = quad.interpolated_corner_positions();
+                // Corners are document-space; subtract the scroll captured at
+                // layout time to paint them in viewport space.
+                let corners = quad
+                    .interpolated_corner_positions()
+                    .map(|corner| corner - state.scroll_offset);
                 (
-                    quad_top_left_or_fallback(Some(corners), quad.visual_pos()),
+                    quad_top_left_or_fallback(
+                        Some(corners),
+                        quad.visual_pos() - state.scroll_offset,
+                    ),
                     Some(corners),
                 )
             } else {
@@ -12623,7 +12649,9 @@ fn paint_cursor_animation_frame(
                 && state.cursor_shape == CursorShape::Block
                 && !state.is_target_redacted
             {
-                editor.quad_cursor().map(|quad| quad.destination_pos())
+                editor
+                    .quad_cursor()
+                    .map(|quad| quad.destination_pos() - state.scroll_offset)
             } else {
                 None
             };

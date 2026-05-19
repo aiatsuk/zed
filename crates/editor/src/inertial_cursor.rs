@@ -465,6 +465,10 @@ pub struct QuadCursor {
     previous_corner_positions: [Vec2; 4],
     /// Accumulated time for fixed-timestep physics
     physics_accumulator: f32,
+    /// Whether a real position has been set yet. The cursor is constructed at a
+    /// placeholder origin, so the first `set_logical_pos` must snap rather than
+    /// animate (otherwise the cursor flies in from the corner on open).
+    initialized: bool,
 }
 
 impl QuadCursor {
@@ -506,6 +510,7 @@ impl QuadCursor {
             cell_height,
             previous_corner_positions,
             physics_accumulator: 0.0,
+            initialized: false,
         }
     }
 
@@ -566,6 +571,15 @@ impl QuadCursor {
         self.logical_center = Vec2::from_point(pos);
 
         if !self.config.enabled {
+            self.snap_to_logical();
+            return;
+        }
+
+        // The first real position after construction must snap, not animate:
+        // the cursor starts at a placeholder origin, so animating would make it
+        // fly in from the corner when an editor opens at a non-zero position.
+        if !self.initialized {
+            self.initialized = true;
             self.snap_to_logical();
             return;
         }
@@ -831,6 +845,8 @@ mod tests {
             20.0,
         );
 
+        // The first positioning snaps; initialize before the animating move.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
         cursor.set_logical_pos(point(Pixels::from(100.0), Pixels::from(0.0)));
 
         // Simulate ~2 seconds of animation at 60fps
@@ -855,6 +871,9 @@ mod tests {
             10.0,
             20.0,
         );
+
+        // The first positioning snaps; initialize before the animating move.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
 
         // Initially at rest
         assert!(!cursor.is_animating());
@@ -901,6 +920,8 @@ mod tests {
             20.0,
         );
 
+        // The first positioning snaps; initialize before the animating move.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
         cursor.set_logical_pos(point(Pixels::from(5_000.0), Pixels::from(0.0)));
 
         let visual = cursor.visual_pos();
@@ -917,6 +938,8 @@ mod tests {
             20.0,
         );
 
+        // The first positioning snaps; initialize before the animating move.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
         cursor.set_logical_pos(point(Pixels::from(20.0), Pixels::from(0.03 * 20.0)));
         assert!(
             cursor
@@ -935,9 +958,29 @@ mod tests {
             20.0,
         );
 
+        // The first positioning snaps; initialize before the animating move.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
         cursor.set_logical_pos(point(Pixels::from(100.0), Pixels::from(0.0)));
         let changed = cursor.update_physics(PHYSICS_DT * 0.5);
         assert!(!changed);
         assert!(cursor.is_animating());
+    }
+
+    #[test]
+    fn first_position_snaps_without_animation() {
+        let mut cursor = QuadCursor::new(
+            InertialCursorConfig::default(),
+            point(Pixels::from(0.0), Pixels::from(0.0)),
+            10.0,
+            20.0,
+        );
+
+        // The cursor is constructed at a placeholder origin, so the first real
+        // position must snap rather than fly in from the corner.
+        cursor.set_logical_pos(point(Pixels::from(500.0), Pixels::from(300.0)));
+
+        assert!(!cursor.is_animating());
+        assert_eq!(f32::from(cursor.visual_pos().x), 500.0);
+        assert_eq!(f32::from(cursor.visual_pos().y), 300.0);
     }
 }
