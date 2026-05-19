@@ -29,6 +29,7 @@ mod highlight_matching_bracket;
 mod hover_links;
 pub mod hover_popover;
 mod indent_guides;
+mod inertial_cursor;
 mod inlays;
 pub mod items;
 mod jsx_tag_auto_close;
@@ -95,7 +96,7 @@ pub use edit_prediction_types::Direction;
 pub use editor_settings::{
     CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, DiffViewStyle,
     DocumentColorsRenderMode, EditorSettings, EditorSettingsScrollbarProxy, ScrollBeyondLastLine,
-    ScrollbarAxes, SearchSettings, ShowMinimap, ui_scrollbar_settings_from_raw,
+    ScrollbarAxes, SearchSettings, ShowMinimap, SmoothCaret, ui_scrollbar_settings_from_raw,
 };
 pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
@@ -110,6 +111,9 @@ use git::{
 pub(crate) use git::{DisplayDiffHunk, PhantomDiffReviewIndicator};
 pub use git::{RenderDiffHunkControlsFn, set_blame_renderer};
 pub use hover_popover::hover_markdown_style;
+pub use inertial_cursor::{
+    CursorAnimationTicker, InertialCursorConfig, QuadCursor, tick_cursor_animation,
+};
 pub use inlays::Inlay;
 pub use items::MAX_TAB_TITLE_LEN;
 pub use linked_editing_ranges::LinkedEdits;
@@ -925,6 +929,10 @@ pub struct Editor {
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     collaboration_hub: Option<Box<dyn CollaborationHub>>,
     blink_manager: Entity<BlinkManager>,
+    quad_cursor: Option<inertial_cursor::QuadCursor>,
+    cursor_animation_ticker: inertial_cursor::CursorAnimationTicker,
+    cursor_animation_callback_generation: u64,
+    active_cursor_animation_callback_generation: Option<u64>,
     show_cursor_names: bool,
     hovered_cursors: HashMap<HoveredCursor, Task<()>>,
     pub show_local_selections: bool,
@@ -1838,6 +1846,8 @@ impl Editor {
                 |cx| EditorSettings::get_global(cx).cursor_blink,
                 cx,
             );
+            blink_manager
+                .set_smooth_blink_enabled(EditorSettings::get_global(cx).smooth_caret.smooth_blink);
             if is_minimap {
                 blink_manager.disable(cx);
             }
@@ -2183,6 +2193,23 @@ impl Editor {
                 .cursor_shape
                 .unwrap_or_default(),
             cursor_offset_on_selection: false,
+            quad_cursor: {
+                let smooth_caret_settings = &EditorSettings::get_global(cx).smooth_caret;
+                let config = Self::build_inertial_cursor_config(smooth_caret_settings);
+                if config.enabled {
+                    Some(inertial_cursor::QuadCursor::new(
+                        config,
+                        gpui::point(gpui::Pixels::ZERO, gpui::Pixels::ZERO),
+                        10.0,
+                        20.0,
+                    ))
+                } else {
+                    None
+                }
+            },
+            cursor_animation_ticker: inertial_cursor::CursorAnimationTicker::new(),
+            cursor_animation_callback_generation: 0,
+            active_cursor_animation_callback_generation: None,
             current_line_highlight: None,
             autoindent_mode: Some(AutoindentMode::EachLine),
             collapse_matches: false,
@@ -2262,7 +2289,14 @@ impl Editor {
                         cx.observe(&multi_buffer, Self::on_buffer_changed),
                         cx.subscribe_in(&multi_buffer, window, Self::on_buffer_event),
                         cx.observe_in(&display_map, window, Self::on_display_map_changed),
-                        cx.observe(&blink_manager, |_, _, cx| cx.notify()),
+                        cx.observe(&blink_manager, |editor, _, cx| {
+                            // Skip blink notifications during smooth cursor animation
+                            // to avoid triggering full frame redraws that cause flickering
+                            if editor.is_cursor_animating() {
+                                return;
+                            }
+                            cx.notify()
+                        }),
                         cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
                         cx.observe_global_in::<GlobalTheme>(window, Self::theme_changed),
                         observe_buffer_font_size_adjustment(cx, |_, cx| cx.notify()),
@@ -2978,6 +3012,61 @@ impl Editor {
 
     pub fn set_cursor_offset_on_selection(&mut self, set_cursor_offset_on_selection: bool) {
         self.cursor_offset_on_selection = set_cursor_offset_on_selection;
+    }
+
+    pub fn quad_cursor(&self) -> Option<&inertial_cursor::QuadCursor> {
+        self.quad_cursor.as_ref()
+    }
+
+    pub fn quad_cursor_mut(&mut self) -> Option<&mut inertial_cursor::QuadCursor> {
+        self.quad_cursor.as_mut()
+    }
+
+    pub fn begin_cursor_animation_callback_cycle(&mut self) -> u64 {
+        self.cursor_animation_callback_generation =
+            self.cursor_animation_callback_generation.wrapping_add(1);
+        let generation = self.cursor_animation_callback_generation;
+        self.active_cursor_animation_callback_generation = Some(generation);
+        generation
+    }
+
+    pub fn is_active_cursor_animation_generation(&self, generation: u64) -> bool {
+        self.active_cursor_animation_callback_generation == Some(generation)
+    }
+
+    pub fn end_cursor_animation_callback_cycle(&mut self, generation: u64) {
+        if self.active_cursor_animation_callback_generation == Some(generation) {
+            self.active_cursor_animation_callback_generation = None;
+        }
+    }
+
+    fn build_inertial_cursor_config(
+        settings: &editor_settings::SmoothCaret,
+    ) -> inertial_cursor::InertialCursorConfig {
+        inertial_cursor::InertialCursorConfig::from_settings(settings)
+    }
+
+    pub fn is_cursor_animating(&self) -> bool {
+        self.quad_cursor.as_ref().is_some_and(|c| c.is_animating())
+    }
+
+    pub fn update_quad_cursor_position(&mut self, pos: gpui::Point<gpui::Pixels>) {
+        if let Some(cursor) = &mut self.quad_cursor {
+            cursor.set_logical_pos(pos);
+        }
+    }
+
+    pub fn set_quad_cursor_cell_size(&mut self, width: f32, height: f32) {
+        if let Some(cursor) = &mut self.quad_cursor {
+            cursor.set_cell_size(width, height);
+        }
+    }
+
+    pub fn tick_cursor_animations(&mut self) -> bool {
+        inertial_cursor::tick_cursor_animation(
+            self.quad_cursor.as_mut(),
+            &mut self.cursor_animation_ticker,
+        )
     }
 
     pub fn set_current_line_highlight(
@@ -9118,7 +9207,7 @@ impl Editor {
     }
 
     pub fn show_local_cursors(&self, window: &mut Window, cx: &mut App) -> bool {
-        (self.read_only(cx) || self.blink_manager.read(cx).visible())
+        (self.read_only(cx) || self.blink_manager.read(cx).should_render())
             && self.focus_handle.is_focused(window)
     }
 
@@ -9478,6 +9567,29 @@ impl Editor {
             self.scroll_manager.vertical_scroll_margin = editor_settings.vertical_scroll_margin;
             self.show_breadcrumbs = editor_settings.toolbar.breadcrumbs;
             self.cursor_shape = editor_settings.cursor_shape.unwrap_or_default();
+
+            let new_smooth_caret_config =
+                Self::build_inertial_cursor_config(&editor_settings.smooth_caret);
+            let smooth_blink_enabled = editor_settings.smooth_caret.smooth_blink;
+            if new_smooth_caret_config.enabled {
+                if let Some(cursor) = &mut self.quad_cursor {
+                    cursor.set_config(new_smooth_caret_config);
+                } else {
+                    self.quad_cursor = Some(inertial_cursor::QuadCursor::new(
+                        new_smooth_caret_config,
+                        gpui::point(gpui::Pixels::ZERO, gpui::Pixels::ZERO),
+                        10.0,
+                        20.0,
+                    ));
+                }
+            } else {
+                self.quad_cursor = None;
+            }
+
+            // Update smooth blink setting (after editor_settings is no longer used)
+            self.blink_manager.update(cx, |blink_manager, _cx| {
+                blink_manager.set_smooth_blink_enabled(smooth_blink_enabled);
+            });
         }
 
         if old_cursor_shape != self.cursor_shape {
