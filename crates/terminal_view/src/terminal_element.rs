@@ -1486,14 +1486,12 @@ impl Element for TerminalElement {
                     )
                 };
 
-                // Layout cursor. Rectangle is used for IME, so we should lay it out even
-                // if we don't end up showing it.
                 let cursor_point = DisplayCursor::from(cursor.point, display_offset);
                 let cursor_text = {
-                    let str_trxt = cursor_char.to_string();
-                    let len = str_trxt.len();
+                    let str_txt = cursor_char.to_string();
+                    let len = str_txt.len();
                     window.text_system().shape_line(
-                        str_trxt.into(),
+                        str_txt.into(),
                         text_style.font_size.to_pixels(window.rem_size()),
                         &[TextRun {
                             len,
@@ -1520,31 +1518,75 @@ impl Element for TerminalElement {
                         size: size(cursor_width.ceil(), dimensions.line_height),
                     });
 
+                let should_blink_cursor = self.terminal_view.read(cx).should_blink_cursor_for_mode(
+                    self.focused,
+                    mode,
+                    cx,
+                );
+
                 let cursor = if let CursorShape::Hidden = cursor.shape {
                     None
-                } else {
+                } else if let Some(bounds) = ime_cursor_bounds {
                     let focused = self.focused;
-                    ime_cursor_bounds.map(move |bounds| {
-                        let (shape, text) = match cursor.shape {
-                            CursorShape::Block if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Block => (EditorCursorShape::Block, Some(cursor_text)),
-                            CursorShape::Underline if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Underline => (EditorCursorShape::Underline, None),
-                            CursorShape::Bar if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Bar => (EditorCursorShape::Bar, None),
-                            CursorShape::HollowBlock => (EditorCursorShape::Hollow, None),
-                            CursorShape::Hidden => unreachable!(),
-                        };
+                    let (render_shape, physics_shape, text) = match cursor.shape {
+                        CursorShape::Block if !focused => {
+                            (EditorCursorShape::Hollow, EditorCursorShape::Block, None)
+                        }
+                        CursorShape::Block => (
+                            EditorCursorShape::Block,
+                            EditorCursorShape::Block,
+                            Some(cursor_text),
+                        ),
+                        CursorShape::Underline if !focused => {
+                            (EditorCursorShape::Hollow, EditorCursorShape::Underline, None)
+                        }
+                        CursorShape::Underline => (
+                            EditorCursorShape::Underline,
+                            EditorCursorShape::Underline,
+                            None,
+                        ),
+                        CursorShape::Bar if !focused => {
+                            (EditorCursorShape::Hollow, EditorCursorShape::Bar, None)
+                        }
+                        CursorShape::Bar => {
+                            (EditorCursorShape::Bar, EditorCursorShape::Bar, None)
+                        }
+                        CursorShape::HollowBlock => {
+                            (EditorCursorShape::Hollow, EditorCursorShape::Hollow, None)
+                        }
+                        CursorShape::Hidden => unreachable!(),
+                    };
 
+                    let (origin, quad_corners, opacity, is_animating) =
+                        self.terminal_view.update(cx, |terminal_view, cx| {
+                            terminal_view.next_cursor_frame(
+                                bounds.origin,
+                                bounds.size.width,
+                                bounds.size.height,
+                                physics_shape,
+                                self.cursor_visible,
+                                should_blink_cursor,
+                                cx,
+                            )
+                        });
+                    if is_animating {
+                        window.request_animation_frame();
+                    }
+
+                    Some(
                         CursorLayout::new(
-                            bounds.origin,
+                            origin,
                             bounds.size.width,
                             bounds.size.height,
                             theme.players().local().cursor,
-                            shape,
+                            render_shape,
                             text,
                         )
-                    })
+                        .with_quad_corners(quad_corners)
+                        .with_opacity(opacity),
+                    )
+                } else {
+                    None
                 };
 
                 let block_below_cursor_element = if let Some(block) = &self.block_below_cursor {

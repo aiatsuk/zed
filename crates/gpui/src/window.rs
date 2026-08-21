@@ -963,6 +963,26 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
+/// A cursor-free base scene captured on the last full frame.
+///
+/// Animation-only frames replay this scene instead of re-running layout, then
+/// paint just the animated cursor on top of it. This keeps continuous cursor
+/// animation cheap without changing any platform renderer.
+pub(crate) struct CachedScene {
+    /// The captured base scene, without the animated cursor.
+    scene: Scene,
+    /// Cache validity key - viewport size
+    viewport_size: Size<Pixels>,
+    /// Cache validity key - scale factor
+    scale_factor: f32,
+}
+
+impl CachedScene {
+    fn is_valid(&self, viewport_size: Size<Pixels>, scale_factor: f32) -> bool {
+        self.viewport_size == viewport_size && self.scale_factor == scale_factor
+    }
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
@@ -1187,6 +1207,9 @@ pub struct Window {
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     pub(crate) refreshing: bool,
+    animation_frame_requested: bool,
+    animation_callbacks: Vec<Box<dyn FnOnce(&mut Window, &mut App) + 'static>>,
+    cached_scene: Option<CachedScene>,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -1876,6 +1899,9 @@ impl Window {
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
             refreshing: false,
+            animation_frame_requested: false,
+            animation_callbacks: Vec::new(),
+            cached_scene: None,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -1941,6 +1967,9 @@ impl ContentMask<Pixels> {
 
 impl Window {
     fn mark_view_dirty(&mut self, view_id: EntityId) {
+        // Invalidate scene cache when any view becomes dirty
+        self.cached_scene = None;
+
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
         // should already be dirty.
         for view_id in self
@@ -2021,6 +2050,8 @@ impl Window {
         if self.invalidator.not_drawing() {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
+            // Invalidate scene cache on refresh
+            self.cached_scene = None;
         }
     }
 
@@ -2391,6 +2422,30 @@ impl Window {
         count
     }
 
+    /// Request an animation-only frame that skips layout and repaints only animated overlays.
+    /// Only animation callbacks will be executed to paint animated elements on top of the last full frame.
+    /// This is much cheaper than a full frame for continuous animations like cursor movement.
+    ///
+    /// If the cache is invalid or views are dirty, falls back to a full frame.
+    pub fn request_animation_only_frame(&self) {
+        self.on_next_frame(move |window, _cx| {
+            window.animation_frame_requested = true;
+            window.invalidator.set_dirty(true);
+        });
+    }
+
+    /// Register a callback to paint animated content during animation-only frames.
+    /// The callback receives the window and app context for painting.
+    /// Callbacks are executed after the cached scene is replayed.
+    ///
+    /// Note: Callbacks must only paint - they should not modify app state.
+    pub fn on_animation_frame<F>(&mut self, callback: F)
+    where
+        F: FnOnce(&mut Window, &mut App) + 'static,
+    {
+        self.animation_callbacks.push(Box::new(callback));
+    }
+
     /// Spawn the future returned by the given closure on the application thread pool.
     /// The closure is provided a handle to the current window and an `AsyncWindowContext` for
     /// use within your future.
@@ -2438,6 +2493,9 @@ impl Window {
         self.viewport_size = self.platform_window.content_size();
         self.display_id = self.platform_window.display().map(|display| display.id());
         self.mouse_position = self.platform_window.mouse_position();
+
+        // Invalidate scene cache when bounds change
+        self.cached_scene = None;
 
         self.refresh();
 
@@ -2886,8 +2944,43 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+
+        // Determine if this is an animation-only frame
+        let can_use_animation_frame = self.animation_frame_requested
+            && self.dirty_views.is_empty()
+            && !self.refreshing
+            && !self.rendered_frame.dispatch_tree.is_empty()
+            && self
+                .cached_scene
+                .as_ref()
+                .map(|c| c.is_valid(self.viewport_size, self.scale_factor))
+                .unwrap_or(false);
+
+        let mut used_animation_frame = false;
         if !cx.mode.skip_drawing() {
-            self.draw_roots(cx);
+            if can_use_animation_frame {
+                // Animation-only frame: replay the cached base scene and paint
+                // the animated cursor on top of it, skipping layout entirely.
+                self.draw_animation_frame(cx);
+                used_animation_frame = true;
+            } else {
+                // Full frame: normal layout + paint.
+                self.draw_roots(cx);
+
+                // A cursor animation callback is registered during layout only
+                // while the cursor is animating. When one is present, cache the
+                // cursor-free base scene so subsequent animation-only frames can
+                // replay it, then run the callbacks to paint the cursor into
+                // this frame (after caching, so it stays out of the cache).
+                // When nothing animates this is skipped entirely, so the common
+                // path pays no extra cost.
+                if !self.animation_callbacks.is_empty() {
+                    self.cache_current_scene();
+                    self.run_animation_callbacks(cx);
+                }
+            }
+            // Paint the overlay after any scene caching so it never ends up in
+            // the cached base scene replayed by animation-only frames.
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -2899,10 +2992,27 @@ impl Window {
                 );
             }
         }
+
+        // Reset animation frame state for next frame
+        self.animation_frame_requested = false;
+        // Note: animation_callbacks already consumed by run_animation_callbacks or draw_animation_frame
+
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
         // Register requested input handler with the platform window.
+        // An animation-only frame skips layout, so input handlers were not
+        // registered into `next_frame`. Move them over from the rendered frame
+        // (taking each slot, which preserves the rendered frame's Vec length)
+        // so the lookup below can hand one back to the platform window.
+        if used_animation_frame && self.next_frame.input_handlers.is_empty() {
+            self.next_frame.input_handlers.extend(
+                self.rendered_frame
+                    .input_handlers
+                    .iter_mut()
+                    .map(|handler| handler.take()),
+            );
+        }
         // Use .take() instead of .pop() to preserve Vec length, so that cached
         // paint_range indices remain valid for reuse_paint on the next frame.
         // Search backwards to find the last Some entry, since reuse_paint may
@@ -2918,12 +3028,19 @@ impl Window {
         }
 
         self.layout_engine.as_mut().unwrap().clear();
-        self.text_system().finish_frame();
+        if used_animation_frame {
+            self.text_system().discard_frame();
+        } else {
+            self.text_system().finish_frame();
+        }
         self.next_frame.finish(&mut self.rendered_frame);
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
+        if used_animation_frame {
+            self.reuse_rendered_frame_state_for_animation();
+        }
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
         let current_focus_path = self.rendered_frame.focus_path();
@@ -2988,6 +3105,118 @@ impl Window {
         // Exit the scope to obtain the arena-clear token this draw owes; the
         // scope's teardown itself happens in `ElementArenaScope::drop`.
         arena_scope.exit(&cx.element_arena)
+    }
+
+    /// Capture the just-drawn base scene so later animation-only frames can
+    /// replay it. Called before animation callbacks run, so the cached scene
+    /// never contains the animated cursor.
+    fn cache_current_scene(&mut self) {
+        self.cached_scene = Some(CachedScene {
+            scene: self.next_frame.scene.clone(),
+            viewport_size: self.viewport_size,
+            scale_factor: self.scale_factor,
+        });
+    }
+
+    /// Draw an animation-only frame by replaying the cached base scene into the
+    /// next frame, then running animation callbacks to paint the cursor on top.
+    fn draw_animation_frame(&mut self, cx: &mut App) {
+        self.next_frame.scene.clear();
+        if let Some(cached) = self.cached_scene.take() {
+            let operation_count = cached.scene.paint_operations.len();
+            self.next_frame
+                .scene
+                .replay(0..operation_count, &cached.scene);
+            self.cached_scene = Some(cached);
+        }
+        self.run_animation_callbacks(cx);
+    }
+
+    fn reuse_rendered_frame_state_for_animation(&mut self) {
+        // Preserve hit-testing and input state when only repainting animations.
+        mem::swap(&mut self.next_frame.focus, &mut self.rendered_frame.focus);
+        mem::swap(
+            &mut self.next_frame.element_states,
+            &mut self.rendered_frame.element_states,
+        );
+        mem::swap(
+            &mut self.next_frame.accessed_element_states,
+            &mut self.rendered_frame.accessed_element_states,
+        );
+        mem::swap(
+            &mut self.next_frame.mouse_listeners,
+            &mut self.rendered_frame.mouse_listeners,
+        );
+        mem::swap(
+            &mut self.next_frame.dispatch_tree,
+            &mut self.rendered_frame.dispatch_tree,
+        );
+        mem::swap(
+            &mut self.next_frame.hitboxes,
+            &mut self.rendered_frame.hitboxes,
+        );
+        mem::swap(
+            &mut self.next_frame.window_control_hitboxes,
+            &mut self.rendered_frame.window_control_hitboxes,
+        );
+        mem::swap(
+            &mut self.next_frame.deferred_draws,
+            &mut self.rendered_frame.deferred_draws,
+        );
+        // Note: `scene` is intentionally not swapped. On an animation-only
+        // frame `next_frame.scene` already holds the replayed base scene plus
+        // the freshly painted cursor, so it is the scene we want to present.
+        mem::swap(
+            &mut self.next_frame.input_handlers,
+            &mut self.rendered_frame.input_handlers,
+        );
+        mem::swap(
+            &mut self.next_frame.tooltip_requests,
+            &mut self.rendered_frame.tooltip_requests,
+        );
+        mem::swap(
+            &mut self.next_frame.cursor_styles,
+            &mut self.rendered_frame.cursor_styles,
+        );
+        mem::swap(
+            &mut self.next_frame.tab_stops,
+            &mut self.rendered_frame.tab_stops,
+        );
+
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            mem::swap(
+                &mut self.next_frame.debug_bounds,
+                &mut self.rendered_frame.debug_bounds,
+            );
+        }
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            mem::swap(
+                &mut self.next_frame.next_inspector_instance_ids,
+                &mut self.rendered_frame.next_inspector_instance_ids,
+            );
+            mem::swap(
+                &mut self.next_frame.inspector_hitboxes,
+                &mut self.rendered_frame.inspector_hitboxes,
+            );
+        }
+    }
+
+    /// Execute animation callbacks to paint the animated cursor into the
+    /// current frame's scene. Used by both full frames (after the base scene is
+    /// cached) and animation-only frames (after the cached scene is replayed).
+    fn run_animation_callbacks(&mut self, cx: &mut App) {
+        if self.animation_callbacks.is_empty() {
+            return;
+        }
+
+        self.invalidator.set_phase(DrawPhase::Paint);
+
+        let callbacks = std::mem::take(&mut self.animation_callbacks);
+        for callback in callbacks {
+            callback(self, cx);
+        }
     }
 
     fn record_entities_accessed(&mut self, cx: &mut App) {
@@ -5237,13 +5466,6 @@ impl Window {
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
-        if self.invalidator.is_dirty() {
-            self.draw(cx).clear(cx);
-        }
-
-        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
-        let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
-
         let mut keystroke: Option<Keystroke> = None;
 
         if let Some(event) = event.downcast_ref::<ModifiersChangedEvent>() {
@@ -5288,6 +5510,18 @@ impl Window {
                 cx.platform.hide_cursor_until_mouse_moves();
             }
         }
+
+        // Skip dispatch if the tree hasn't been populated yet (before first frame)
+        if self.rendered_frame.dispatch_tree.is_empty() {
+            return;
+        }
+
+        if self.invalidator.is_dirty() {
+            self.draw(cx).clear(cx);
+        }
+
+        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
+        let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
         let Some(keystroke) = keystroke else {
             self.finish_dispatch_key_event(event, dispatch_path, self.context_stack(), cx);

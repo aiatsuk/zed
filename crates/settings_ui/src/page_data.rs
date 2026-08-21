@@ -1301,7 +1301,7 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn cursor_section() -> [SettingsPageItem; 6] {
+    fn cursor_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Cursor"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -1369,6 +1369,20 @@ fn appearance_page() -> SettingsPage {
                     pick: |settings_content| settings_content.reduce_motion.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.reduce_motion = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Smooth Cursor Animation",
+                description: "Enable smooth cursor movement animation.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("smooth_caret"),
+                    pick: |settings_content| settings_content.editor.smooth_caret.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.editor.smooth_caret = value;
                     },
                 }),
                 metadata: None,
