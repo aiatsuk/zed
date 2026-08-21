@@ -872,7 +872,11 @@ pub enum CursorShape {
 pub struct SmoothCaretContent {
     /// Whether smooth cursor animation is enabled.
     ///
-    /// Default: true
+    /// The feature as a whole is off by default (`"smooth_caret": false`);
+    /// this field only controls the object form, where omitting it means
+    /// enabled — writing `"smooth_caret": {}` turns the animation on.
+    ///
+    /// Default: true (within the object form)
     pub enabled: Option<bool>,
 
     /// Animation duration for large jumps (search, goto) in milliseconds.
@@ -895,8 +899,12 @@ pub struct SmoothCaretContent {
     #[schemars(range(min = 0.0, max = 1.0))]
     pub trail_size: Option<f32>,
 
-    /// Whether to animate cursor during insert mode (typing).
-    /// When false, cursor snaps instantly for short horizontal movements.
+    /// Whether to animate short typing-like cursor movements.
+    ///
+    /// Despite the name, this is not wired to vim's insert mode: a movement
+    /// counts as "typing-like" when it stays on the same line and spans at
+    /// most two cells. When false, such movements snap instantly and only
+    /// larger jumps animate.
     ///
     /// Default: true
     pub animate_in_insert_mode: Option<bool>,

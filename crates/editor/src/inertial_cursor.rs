@@ -771,12 +771,22 @@ impl QuadCursor {
     /// This provides sub-pixel smooth animation at any frame rate.
     pub fn interpolated_corner_positions(&self) -> [Point<Pixels>; 4] {
         let alpha = self.interpolation_alpha();
+        // At rest, snap each corner to the destination's subpixel phase
+        // (Neovide's `snapped_corner`): coordinates land an integer number of
+        // pixels away from the destination, so the cursor is crisp at rest
+        // while staying subpixel-smooth in flight.
+        let snap_phase = (!self.is_animating())
+            .then(|| (self.logical_center.x.fract(), self.logical_center.y.fract()));
         std::array::from_fn(|i| {
             let prev = self.previous_corner_positions[i];
             let curr = self.corners[i].position();
             // Linear interpolation
-            let x = prev.x + (curr.x - prev.x) * alpha;
-            let y = prev.y + (curr.y - prev.y) * alpha;
+            let mut x = prev.x + (curr.x - prev.x) * alpha;
+            let mut y = prev.y + (curr.y - prev.y) * alpha;
+            if let Some((phase_x, phase_y)) = snap_phase {
+                x = (x - phase_x).round() + phase_x;
+                y = (y - phase_y).round() + phase_y;
+            }
             point(Pixels::from(x), Pixels::from(y))
         })
     }
@@ -810,6 +820,19 @@ pub fn tick_cursor_animation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spring_snaps_to_target_when_animation_length_not_longer_than_dt() {
+        // Neovide parity: an animation shorter than the frame delta finishes
+        // immediately instead of producing invisible tail frames at low FPS.
+        let mut spring = SpringAnimation {
+            position: 5.0,
+            velocity: 3.0,
+        };
+        assert!(!spring.update(0.1, 0.05));
+        assert_eq!(spring.position, 0.0);
+        assert_eq!(spring.velocity, 0.0);
+    }
 
     #[test]
     fn quad_cursor_disabled_snaps_immediately() {

@@ -10718,21 +10718,65 @@ fn paint_cursor_animation_frame(
     // draw over the gutter, tab bar, or adjacent panes.
     let text_bounds = state.text_bounds;
     window.with_content_mask(Some(ContentMask { bounds: text_bounds }), |window| {
-        if cursor_animating
-            && cursor.block_text.is_some()
-            && let Some(destination_pos) = destination_pos
-        {
-            let destination_bounds = Bounds::new(
-                state.content_origin + destination_pos,
-                size(state.block_width, state.line_height),
-            );
-            window.paint_quad(fill(
-                destination_bounds,
-                cx.theme().colors().editor_background,
-            ));
-        }
+        // While a block cursor is in flight, the destination glyph stays put
+        // and is progressively revealed as the quad arrives (Neovide's
+        // clip-path reveal): the quad paints without a glyph, then the glyph is
+        // painted in cursor-foreground color clipped to the intersection of
+        // the quad's bounding box and the destination cell. The normally
+        // painted glyph underneath stays visible outside the quad.
+        let destination_glyph = if cursor_animating {
+            cursor.block_text.take().zip(destination_pos)
+        } else {
+            None
+        };
 
         cursor.paint(state.content_origin, window, cx);
+
+        if let Some((block_text, destination_pos)) = destination_glyph {
+            let destination_origin = state.content_origin + destination_pos;
+            let destination_bounds = Bounds::new(
+                destination_origin,
+                size(state.block_width, state.line_height),
+            );
+            let reveal_bounds = cursor
+                .quad_corners
+                .map(|corners| {
+                    let mut min = corners[0];
+                    let mut max = corners[0];
+                    for corner in &corners[1..] {
+                        min.x = min.x.min(corner.x);
+                        min.y = min.y.min(corner.y);
+                        max.x = max.x.max(corner.x);
+                        max.y = max.y.max(corner.y);
+                    }
+                    Bounds::from_corners(
+                        min + state.content_origin,
+                        max + state.content_origin,
+                    )
+                    .intersect(&destination_bounds)
+                })
+                .unwrap_or(destination_bounds);
+            if !reveal_bounds.is_empty() {
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: reveal_bounds,
+                    }),
+                    |window| {
+                        block_text
+                            .paint_with_opacity(
+                                destination_origin,
+                                state.line_height,
+                                TextAlign::Left,
+                                None,
+                                blink_opacity,
+                                window,
+                                cx,
+                            )
+                            .log_err();
+                    },
+                );
+            }
+        }
 
         for other in &mut state.other_cursors {
             other.paint(state.content_origin, window, cx);
