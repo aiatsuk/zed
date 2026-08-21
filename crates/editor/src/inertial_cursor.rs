@@ -9,11 +9,6 @@ use crate::editor_settings::SmoothCaret;
 /// Physics always runs at this rate; rendering interpolates between states.
 const PHYSICS_DT: f32 = 1.0 / 120.0;
 
-/// Largest physics step used when pacing a rendered frame. A long frame is
-/// split into chunks no larger than this so it can never produce a single
-/// oversized jump. Kept equal to `PHYSICS_DT`.
-const MAX_ANIMATION_DT: f32 = PHYSICS_DT;
-
 /// Minimum animation time for corner animation.
 /// Allows near-instant snap for leading corners with high trail_size.
 const MIN_CORNER_ANIMATION_TIME: f32 = 0.001;
@@ -22,8 +17,12 @@ const MIN_CORNER_ANIMATION_TIME: f32 = 0.001;
 /// Only check position for convergence, not velocity.
 const SPRING_CONVERGENCE_THRESHOLD: f32 = 0.01;
 
-const BAR_WIDTH: f32 = 2.0;
-const UNDERLINE_HEIGHT: f32 = 2.0;
+/// Painted width of a bar cursor, in pixels. Shared with the paint code in
+/// `element.rs` so physics and rendering agree on the bar footprint.
+pub(crate) const BAR_WIDTH: f32 = 2.0;
+/// Painted height of an underline cursor, in pixels. Shared with the paint
+/// code in `element.rs`.
+pub(crate) const UNDERLINE_HEIGHT: f32 = 2.0;
 const SHORT_MOVE_VERTICAL_THRESHOLD: f32 = 0.001;
 
 /// Simple frame pacing for cursor animations.
@@ -796,12 +795,10 @@ pub fn tick_cursor_animation(
         return false;
     };
 
+    // `update_physics` runs its own fixed-timestep loop internally, so the
+    // whole frame delta can be handed over in one call.
     let dt_secs = ticker.tick(Instant::now()).as_secs_f32();
-    let steps = ((dt_secs / MAX_ANIMATION_DT).ceil() as usize).max(1);
-    let dt_per_step = dt_secs / steps as f32;
-    for _ in 0..steps {
-        cursor.update_physics(dt_per_step);
-    }
+    cursor.update_physics(dt_secs);
 
     let still_animating = cursor.is_animating();
     if !still_animating {

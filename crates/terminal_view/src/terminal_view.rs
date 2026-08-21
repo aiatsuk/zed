@@ -259,7 +259,14 @@ impl TerminalView {
         );
         let cursor_shape = TerminalSettings::get_global(cx).cursor_shape;
         let smooth_caret_settings = EditorSettings::get_global(cx).smooth_caret;
-        let smooth_caret_config = InertialCursorConfig::from_settings(&smooth_caret_settings);
+        // Reduce-motion disables the cursor animation and blink fade
+        // regardless of the smooth-caret setting.
+        let reduce_motion = cx.reduce_motion();
+        let mut smooth_caret_config = InertialCursorConfig::from_settings(&smooth_caret_settings);
+        if reduce_motion {
+            smooth_caret_config.enabled = false;
+        }
+        let smooth_blink_enabled = smooth_caret_settings.smooth_blink && !reduce_motion;
 
         let scroll_handle = TerminalScrollHandle::new(terminal.read(cx));
 
@@ -276,7 +283,7 @@ impl TerminalView {
             )
         });
         blink_manager.update(cx, |manager, _cx| {
-            manager.set_smooth_blink_enabled(smooth_caret_settings.smooth_blink);
+            manager.set_smooth_blink_enabled(smooth_blink_enabled);
         });
 
         let subscriptions = vec![
@@ -610,7 +617,14 @@ impl TerminalView {
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let settings = TerminalSettings::get_global(cx);
         let smooth_caret_settings = EditorSettings::get_global(cx).smooth_caret;
-        let smooth_caret_config = InertialCursorConfig::from_settings(&smooth_caret_settings);
+        // Reduce-motion disables the cursor animation and blink fade
+        // regardless of the smooth-caret setting.
+        let reduce_motion = cx.reduce_motion();
+        let mut smooth_caret_config = InertialCursorConfig::from_settings(&smooth_caret_settings);
+        if reduce_motion {
+            smooth_caret_config.enabled = false;
+        }
+        let smooth_blink_enabled = smooth_caret_settings.smooth_blink && !reduce_motion;
         let breadcrumb_visibility_changed = self.show_breadcrumbs != settings.toolbar.breadcrumbs;
         self.show_breadcrumbs = settings.toolbar.breadcrumbs;
 
@@ -637,7 +651,7 @@ impl TerminalView {
             },
         );
         self.blink_manager.update(cx, |manager, _cx| {
-            manager.set_smooth_blink_enabled(smooth_caret_settings.smooth_blink);
+            manager.set_smooth_blink_enabled(smooth_blink_enabled);
         });
 
         if smooth_caret_config.enabled {

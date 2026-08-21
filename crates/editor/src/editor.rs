@@ -1996,8 +1996,9 @@ impl Editor {
                 |cx| EditorSettings::get_global(cx).cursor_blink,
                 cx,
             );
-            blink_manager
-                .set_smooth_blink_enabled(EditorSettings::get_global(cx).smooth_caret.smooth_blink);
+            blink_manager.set_smooth_blink_enabled(
+                EditorSettings::get_global(cx).smooth_caret.smooth_blink && !cx.reduce_motion(),
+            );
             if is_minimap {
                 blink_manager.disable(cx);
             }
@@ -2362,7 +2363,7 @@ impl Editor {
             cursor_offset_on_selection: false,
             quad_cursor: {
                 let smooth_caret_settings = &EditorSettings::get_global(cx).smooth_caret;
-                let config = Self::build_inertial_cursor_config(smooth_caret_settings);
+                let config = Self::build_inertial_cursor_config(smooth_caret_settings, cx);
                 if config.enabled {
                     Some(inertial_cursor::QuadCursor::new(
                         config,
@@ -3251,8 +3252,15 @@ impl Editor {
 
     fn build_inertial_cursor_config(
         settings: &editor_settings::SmoothCaret,
+        cx: &App,
     ) -> inertial_cursor::InertialCursorConfig {
-        inertial_cursor::InertialCursorConfig::from_settings(settings)
+        let mut config = inertial_cursor::InertialCursorConfig::from_settings(settings);
+        // Reduce-motion disables the cursor animation regardless of the
+        // smooth-caret setting; the cursor then moves instantly.
+        if cx.reduce_motion() {
+            config.enabled = false;
+        }
+        config
     }
 
     pub fn is_cursor_animating(&self) -> bool {
@@ -10027,8 +10035,9 @@ impl Editor {
             self.cursor_shape = editor_settings.cursor_shape.unwrap_or_default();
 
             let new_smooth_caret_config =
-                Self::build_inertial_cursor_config(&editor_settings.smooth_caret);
-            let smooth_blink_enabled = editor_settings.smooth_caret.smooth_blink;
+                Self::build_inertial_cursor_config(&editor_settings.smooth_caret, cx);
+            let smooth_blink_enabled =
+                editor_settings.smooth_caret.smooth_blink && !cx.reduce_motion();
             if new_smooth_caret_config.enabled {
                 if let Some(cursor) = &mut self.quad_cursor {
                     cursor.set_config(new_smooth_caret_config);

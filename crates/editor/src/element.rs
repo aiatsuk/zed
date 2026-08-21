@@ -10492,6 +10492,19 @@ fn quad_top_left_or_fallback(
         .unwrap_or(fallback_origin)
 }
 
+/// If the quad corners (ordered top-left, top-right, bottom-right,
+/// bottom-left) form an axis-aligned rectangle within a small epsilon, return
+/// its bounds; otherwise `None`. Used to paint a settled cursor as a plain
+/// quad instead of a tessellated path.
+fn axis_aligned_quad_bounds(corners: [gpui::Point<Pixels>; 4]) -> Option<Bounds<Pixels>> {
+    const EPSILON: f32 = 0.01;
+    let aligned = f32::from(corners[0].y - corners[1].y).abs() <= EPSILON
+        && f32::from(corners[3].y - corners[2].y).abs() <= EPSILON
+        && f32::from(corners[0].x - corners[3].x).abs() <= EPSILON
+        && f32::from(corners[1].x - corners[2].x).abs() <= EPSILON;
+    aligned.then(|| Bounds::from_corners(corners[0], corners[2]))
+}
+
 #[derive(Debug, Clone)]
 pub struct IndentGuideLayout {
     origin: gpui::Point<Pixels>,
@@ -10901,10 +10914,36 @@ impl CursorLayout {
         color: Hsla,
         window: &mut Window,
     ) {
+        let bar_width = px(crate::inertial_cursor::BAR_WIDTH);
+        let underline_height = px(crate::inertial_cursor::UNDERLINE_HEIGHT);
+
+        // When the quad has settled into an axis-aligned rectangle (the common
+        // case once the animation converges), paint it as a plain quad instead
+        // of tessellating a path.
+        if let Some(bounds) = axis_aligned_quad_bounds(corners) {
+            let rect = match self.shape {
+                CursorShape::Bar => Bounds {
+                    origin: bounds.origin,
+                    size: size(bar_width, bounds.size.height),
+                },
+                CursorShape::Block | CursorShape::Hollow => bounds,
+                CursorShape::Underline => Bounds {
+                    origin: point(bounds.origin.x, bounds.bottom_left().y - underline_height),
+                    size: size(bounds.size.width, underline_height),
+                },
+            };
+            let rect = window.pixel_snap_bounds(rect);
+            if matches!(self.shape, CursorShape::Hollow) {
+                window.paint_quad(outline(rect, color, BorderStyle::Solid));
+            } else {
+                window.paint_quad(fill(rect, color));
+            }
+            return;
+        }
+
         match self.shape {
             CursorShape::Bar => {
                 // Bar: only use left edge of quad (corners 0 and 3)
-                let bar_width = px(2.0);
                 let mut builder = gpui::PathBuilder::fill();
                 builder.move_to(corners[0]);
                 builder.line_to(point(corners[0].x + bar_width, corners[0].y));
@@ -10931,7 +10970,6 @@ impl CursorLayout {
             }
             CursorShape::Underline => {
                 // Underline: use bottom edge of quad (corners 2 and 3)
-                let underline_height = px(2.0);
                 let mut builder = gpui::PathBuilder::fill();
                 builder.move_to(point(corners[3].x, corners[3].y - underline_height));
                 builder.line_to(point(corners[2].x, corners[2].y - underline_height));

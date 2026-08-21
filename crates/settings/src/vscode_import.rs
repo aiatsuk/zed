@@ -316,7 +316,10 @@ impl VsCodeSettings {
             ),
             selection_highlight: self.read_bool("editor.selectionHighlight"),
             show_signature_help_after_edits: self.read_bool("editor.parameterHints.enabled"),
-            smooth_caret: None,
+            smooth_caret: self.read_enum("editor.cursorSmoothCaretAnimation", |s| match s {
+                "on" | "explicit" => Some(SmoothCaretSetting::Bool(true)),
+                _ => None,
+            }),
             snippet_sort_order: None,
             toolbar: None,
             use_smartcase_search: self.read_bool("search.smartCase"),
@@ -1176,5 +1179,30 @@ mod tests {
             None
         );
         assert_eq!(imported_reduce_motion("{}"), None);
+    }
+
+    fn imported_smooth_caret(content: &str) -> Option<SmoothCaretSetting> {
+        VsCodeSettings::from_str(content, VsCodeSettingsSource::VsCode)
+            .unwrap()
+            .settings_content()
+            .editor
+            .smooth_caret
+    }
+
+    #[test]
+    fn test_import_smooth_caret() {
+        assert_eq!(
+            imported_smooth_caret(r#"{ "editor.cursorSmoothCaretAnimation": "on" }"#),
+            Some(SmoothCaretSetting::Bool(true))
+        );
+        assert_eq!(
+            imported_smooth_caret(r#"{ "editor.cursorSmoothCaretAnimation": "explicit" }"#),
+            Some(SmoothCaretSetting::Bool(true))
+        );
+        assert_eq!(
+            imported_smooth_caret(r#"{ "editor.cursorSmoothCaretAnimation": "off" }"#),
+            None
+        );
+        assert_eq!(imported_smooth_caret("{}"), None);
     }
 }
