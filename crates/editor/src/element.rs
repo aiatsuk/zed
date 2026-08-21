@@ -1231,6 +1231,7 @@ impl EditorElement {
                             cursor_shape: cursor.shape,
                             target_display_point: cursor_position,
                             block_text: cursor.block_text.clone(),
+                            block_text_shaping_attempted: false,
                             font: block_cursor_font.clone(),
                             font_size: cursor_row_layout.font_size,
                             block_text_color,
@@ -10594,8 +10595,12 @@ struct CursorAnimationState {
     cursor_shape: CursorShape,
     /// Target display point captured at layout time.
     target_display_point: DisplayPoint,
-    /// Block text captured at layout time (character under cursor)
+    /// Block text captured at layout time (character under cursor), or shaped
+    /// lazily on the first animation frame when layout produced none.
     block_text: Option<ShapedLine>,
+    /// Whether the lazy shaping above already ran; the target never changes
+    /// within one animation cycle, so one attempt suffices.
+    block_text_shaping_attempted: bool,
     /// Font for shaping block_text
     font: Font,
     /// Font size for shaping block_text
@@ -10653,7 +10658,13 @@ fn paint_cursor_animation_frame(
 
             let cursor_animating = editor.is_cursor_animating();
 
+            // Shape the destination glyph at most once per animation cycle:
+            // the target is fixed for the state's lifetime (a retarget builds
+            // a new state at the next layout), and the text system's frame
+            // cache is discarded on animation-only frames, so re-shaping here
+            // would repeat HarfBuzz work on every frame.
             let fresh_block_text = if state.block_text.is_none()
+                && !state.block_text_shaping_attempted
                 && state.cursor_shape == CursorShape::Block
                 && !state.is_target_redacted
             {
@@ -10699,7 +10710,11 @@ fn paint_cursor_animation_frame(
     let blink_animating = state.blink_manager.read(cx).is_smooth_blink_animating();
     let still_animating = cursor_animating || blink_animating;
 
-    let block_text = state.block_text.clone().or(fresh_block_text);
+    state.block_text_shaping_attempted = true;
+    if let Some(fresh_block_text) = fresh_block_text {
+        state.block_text = Some(fresh_block_text);
+    }
+    let block_text = state.block_text.clone();
 
     let mut cursor = CursorLayout {
         origin: cursor_origin,
