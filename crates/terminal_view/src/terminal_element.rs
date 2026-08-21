@@ -48,6 +48,92 @@ pub struct LayoutState {
     content_mode: ContentMode,
 }
 
+/// State for the terminal's cursor animation callback, mirroring the editor's
+/// `CursorAnimationState`. The callback repaints only the cursor on top of the
+/// cached scene, re-registering itself while the animation continues.
+struct TerminalCursorAnimationState {
+    generation: u64,
+    terminal_view: Entity<TerminalView>,
+    /// Origin the cursor layout is painted relative to; matches the origin
+    /// used by the terminal element's normal paint pass.
+    content_origin: GpuiPoint<Pixels>,
+    /// Terminal content bounds; all callback painting is clipped to them.
+    mask_bounds: Bounds<Pixels>,
+    /// Cursor origin captured at layout time, used when no quad cursor exists
+    /// (e.g. a pure smooth-blink fade).
+    fallback_origin: GpuiPoint<Pixels>,
+    block_width: Pixels,
+    line_height: Pixels,
+    color: Hsla,
+    shape: EditorCursorShape,
+    text: Option<gpui::ShapedLine>,
+    should_show_cursor: bool,
+    should_blink_cursor: bool,
+}
+
+/// Paint one frame of the terminal cursor animation and re-register the
+/// callback if the animation is still running.
+fn paint_terminal_cursor_animation_frame(
+    state: TerminalCursorAnimationState,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !state
+        .terminal_view
+        .read(cx)
+        .is_active_cursor_animation_generation(state.generation)
+    {
+        return;
+    }
+
+    let (origin, quad_corners, opacity, still_animating) =
+        state.terminal_view.update(cx, |terminal_view, cx| {
+            terminal_view.tick_cursor_animation_frame(
+                state.fallback_origin,
+                state.should_show_cursor,
+                state.should_blink_cursor,
+                cx,
+            )
+        });
+
+    let mut cursor = CursorLayout::new(
+        origin,
+        state.block_width,
+        state.line_height,
+        state.color,
+        state.shape,
+        state.text.clone(),
+    )
+    .with_quad_corners(quad_corners)
+    .with_opacity(opacity);
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: state.mask_bounds,
+        }),
+        |window| cursor.paint(state.content_origin, window, cx),
+    );
+
+    if !state
+        .terminal_view
+        .read(cx)
+        .is_active_cursor_animation_generation(state.generation)
+    {
+        return;
+    }
+
+    if still_animating {
+        window.request_animation_only_frame();
+        window.on_animation_frame(move |window, cx| {
+            paint_terminal_cursor_animation_frame(state, window, cx);
+        });
+    } else {
+        state.terminal_view.update(cx, |terminal_view, cx| {
+            terminal_view.end_cursor_animation_callback_cycle(state.generation);
+            cx.notify();
+        });
+    }
+}
+
 /// Helper struct for converting terminal cursor points to displayed cursor points.
 #[derive(Copy, Clone)]
 struct DisplayCursor {
@@ -1525,6 +1611,9 @@ impl Element for TerminalElement {
                 );
 
                 let cursor = if let CursorShape::Hidden = cursor.shape {
+                    self.terminal_view.update(cx, |terminal_view, _cx| {
+                        terminal_view.cancel_cursor_animation_callbacks();
+                    });
                     None
                 } else if let Some(bounds) = ime_cursor_bounds {
                     let focused = self.focused;
@@ -1569,23 +1658,66 @@ impl Element for TerminalElement {
                                 cx,
                             )
                         });
-                    if is_animating {
-                        window.request_animation_frame();
-                    }
 
-                    Some(
-                        CursorLayout::new(
-                            origin,
-                            bounds.size.width,
-                            bounds.size.height,
-                            theme.players().local().cursor,
-                            render_shape,
+                    if is_animating {
+                        // Hand the cursor to an animation-only callback (the
+                        // same cheap path the editor uses): the cursor is
+                        // repainted on top of the cached scene each frame
+                        // instead of re-running the whole terminal layout.
+                        // The normal paint path paints nothing, so the cursor
+                        // is never double-painted.
+                        let scroll_top = self.terminal_view.read(cx).scroll_top;
+                        let scale_factor = window.scale_factor();
+                        let snap_px = |value: Pixels| {
+                            Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
+                        };
+                        let content_origin =
+                            dimensions.bounds.origin - GpuiPoint::new(px(0.), scroll_top);
+                        let content_origin =
+                            point(snap_px(content_origin.x), snap_px(content_origin.y));
+                        let generation = self.terminal_view.update(cx, |terminal_view, _cx| {
+                            terminal_view.begin_cursor_animation_callback_cycle()
+                        });
+                        let state = TerminalCursorAnimationState {
+                            generation,
+                            terminal_view: self.terminal_view.clone(),
+                            content_origin,
+                            mask_bounds: dimensions.bounds,
+                            fallback_origin: origin,
+                            block_width: bounds.size.width,
+                            line_height: bounds.size.height,
+                            color: theme.players().local().cursor,
+                            shape: render_shape,
                             text,
+                            should_show_cursor: self.cursor_visible,
+                            should_blink_cursor,
+                        };
+                        window.request_animation_only_frame();
+                        window.on_animation_frame(move |window, cx| {
+                            paint_terminal_cursor_animation_frame(state, window, cx);
+                        });
+                        None
+                    } else {
+                        self.terminal_view.update(cx, |terminal_view, _cx| {
+                            terminal_view.cancel_cursor_animation_callbacks();
+                        });
+                        Some(
+                            CursorLayout::new(
+                                origin,
+                                bounds.size.width,
+                                bounds.size.height,
+                                theme.players().local().cursor,
+                                render_shape,
+                                text,
+                            )
+                            .with_quad_corners(quad_corners)
+                            .with_opacity(opacity),
                         )
-                        .with_quad_corners(quad_corners)
-                        .with_opacity(opacity),
-                    )
+                    }
                 } else {
+                    self.terminal_view.update(cx, |terminal_view, _cx| {
+                        terminal_view.cancel_cursor_animation_callbacks();
+                    });
                     None
                 };
 

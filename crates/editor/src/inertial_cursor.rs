@@ -420,6 +420,14 @@ impl AnimatedCorner {
         self.current_position
     }
 
+    /// Rigidly translate the corner by `delta` without re-targeting: the
+    /// current position and remembered destination shift together, and the
+    /// springs (which hold offsets relative to the destination) are untouched.
+    pub fn shift_by(&mut self, delta: Vec2) {
+        self.current_position = self.current_position + delta;
+        self.previous_destination = self.previous_destination + delta;
+    }
+
     pub fn is_complete(&self) -> bool {
         self.animation_x.is_complete() && self.animation_y.is_complete()
     }
@@ -703,6 +711,26 @@ impl QuadCursor {
         self.logical_center.to_point()
     }
 
+    /// Rigidly translate the whole cursor by `delta` without re-targeting.
+    ///
+    /// Used when the viewport scrolls under the cursor: the cursor must move
+    /// with its line instead of spring-animating toward the shifted position.
+    /// The destination, every corner, and the interpolation history all shift
+    /// together, so an in-flight animation continues undisturbed.
+    pub fn shift_by(&mut self, delta: Point<Pixels>) {
+        let delta = Vec2::from_point(delta);
+        if delta.length() < f32::EPSILON {
+            return;
+        }
+        self.logical_center = self.logical_center + delta;
+        for corner in &mut self.corners {
+            corner.shift_by(delta);
+        }
+        for previous in &mut self.previous_corner_positions {
+            *previous = *previous + delta;
+        }
+    }
+
     pub fn snap_to_logical(&mut self) {
         for corner in &mut self.corners {
             corner.init_position(self.logical_center, self.cell_width, self.cell_height);
@@ -832,6 +860,35 @@ mod tests {
         assert!(!spring.update(0.1, 0.05));
         assert_eq!(spring.position, 0.0);
         assert_eq!(spring.velocity, 0.0);
+    }
+
+    #[test]
+    fn shift_by_translates_rigidly_without_retargeting() {
+        let mut cursor = QuadCursor::new(
+            InertialCursorConfig::default(),
+            point(Pixels::from(0.0), Pixels::from(0.0)),
+            10.0,
+            20.0,
+        );
+        // First position snaps; the second starts an animation.
+        cursor.set_logical_pos(point(Pixels::from(0.0), Pixels::from(0.0)));
+        cursor.set_logical_pos(point(Pixels::from(100.0), Pixels::from(0.0)));
+        assert!(cursor.is_animating());
+        cursor.update_physics(PHYSICS_DT * 4.0);
+        let visual_before = cursor.visual_pos();
+
+        cursor.shift_by(point(Pixels::from(0.0), Pixels::from(40.0)));
+
+        // Destination and visual position shift together; the animation state
+        // is unchanged (still animating, no new jump started).
+        assert_eq!(f32::from(cursor.destination_pos().x), 100.0);
+        assert_eq!(f32::from(cursor.destination_pos().y), 40.0);
+        assert_eq!(f32::from(cursor.visual_pos().x), f32::from(visual_before.x));
+        assert_eq!(
+            f32::from(cursor.visual_pos().y),
+            f32::from(visual_before.y) + 40.0
+        );
+        assert!(cursor.is_animating());
     }
 
     #[test]

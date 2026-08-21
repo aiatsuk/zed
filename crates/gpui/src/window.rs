@@ -963,14 +963,17 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
-/// A cursor-free base scene captured on the last full frame.
+/// Description of the cursor-free base prefix of the last fully drawn scene.
 ///
-/// Animation-only frames replay this scene instead of re-running layout, then
-/// paint just the animated cursor on top of it. This keeps continuous cursor
-/// animation cheap without changing any platform renderer.
+/// Animation callbacks run last in `draw`, so their output is a strict suffix
+/// of the frame's paint operations. Animation-only frames rebuild the base by
+/// replaying the first `base_paint_operations` operations of the rendered
+/// scene, then paint just the animated cursor on top. Recording a length
+/// instead of cloning the scene avoids a multi-megabyte copy on every full
+/// frame that has animation callbacks.
 pub(crate) struct CachedScene {
-    /// The captured base scene, without the animated cursor.
-    scene: Scene,
+    /// Number of paint operations forming the cursor-free base prefix.
+    base_paint_operations: usize,
     /// Cache validity key - viewport size
     viewport_size: Size<Pixels>,
     /// Cache validity key - scale factor
@@ -3126,27 +3129,32 @@ impl Window {
         arena_scope.exit(&cx.element_arena)
     }
 
-    /// Capture the just-drawn base scene so later animation-only frames can
-    /// replay it. Called before animation callbacks run, so the cached scene
-    /// never contains the animated cursor.
+    /// Record the length of the just-drawn base scene so later animation-only
+    /// frames can replay exactly that prefix. Called before animation
+    /// callbacks run, so the recorded prefix never contains the animated
+    /// cursor.
     fn cache_current_scene(&mut self) {
         self.cached_scene = Some(CachedScene {
-            scene: self.next_frame.scene.clone(),
+            base_paint_operations: self.next_frame.scene.len(),
             viewport_size: self.viewport_size,
             scale_factor: self.scale_factor,
         });
     }
 
-    /// Draw an animation-only frame by replaying the cached base scene into the
-    /// next frame, then running animation callbacks to paint the cursor on top.
+    /// Draw an animation-only frame by replaying the cursor-free base prefix
+    /// of the rendered scene into the next frame, then running animation
+    /// callbacks to paint the cursor on top. Replaying preserves the base
+    /// prefix operation-for-operation, so consecutive animation-only frames
+    /// keep replaying the same base.
     fn draw_animation_frame(&mut self, cx: &mut App) {
         self.next_frame.scene.clear();
-        if let Some(cached) = self.cached_scene.take() {
-            let operation_count = cached.scene.paint_operations.len();
+        if let Some(cached) = &self.cached_scene {
+            let base_len = cached
+                .base_paint_operations
+                .min(self.rendered_frame.scene.len());
             self.next_frame
                 .scene
-                .replay(0..operation_count, &cached.scene);
-            self.cached_scene = Some(cached);
+                .replay(0..base_len, &self.rendered_frame.scene);
         }
         self.run_animation_callbacks(cx);
     }

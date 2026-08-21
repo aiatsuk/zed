@@ -141,6 +141,11 @@ pub struct TerminalView {
     quad_cursor: Option<QuadCursor>,
     cursor_animation_ticker: CursorAnimationTicker,
     last_cursor_origin: Option<gpui::Point<Pixels>>,
+    /// Scrollback offset at the last cursor layout, used to detect pure
+    /// scrolls and shift the animated cursor rigidly with the grid.
+    last_cursor_display_offset: Option<usize>,
+    cursor_animation_callback_generation: u64,
+    active_cursor_animation_callback_generation: Option<u64>,
     mode: TerminalMode,
     // Explicit override for whether workspace-specific context menu actions are shown.
     // When `None`, visibility is derived from `mode` (hidden for embedded terminals).
@@ -312,6 +317,9 @@ impl TerminalView {
             }),
             cursor_animation_ticker: CursorAnimationTicker::new(),
             last_cursor_origin: None,
+            last_cursor_display_offset: None,
+            cursor_animation_callback_generation: 0,
+            active_cursor_animation_callback_generation: None,
             blinking_terminal_enabled: false,
             hover: None,
             hover_tooltip_update: Task::ready(()),
@@ -943,6 +951,26 @@ impl TerminalView {
         f32,
         bool,
     ) {
+        // A scrollback scroll shifts the whole grid rigidly: move the cursor
+        // with it instead of spring-animating after it, and do not count it as
+        // cursor movement for blink pausing.
+        let display_offset = self.terminal.read(cx).last_content.display_offset;
+        if let Some(previous_offset) = self.last_cursor_display_offset
+            && previous_offset != display_offset
+        {
+            let delta = gpui::point(
+                Pixels::ZERO,
+                line_height * (display_offset as f32 - previous_offset as f32),
+            );
+            if let Some(cursor) = &mut self.quad_cursor {
+                cursor.shift_by(delta);
+            }
+            if let Some(last_origin) = &mut self.last_cursor_origin {
+                *last_origin = *last_origin + delta;
+            }
+        }
+        self.last_cursor_display_offset = Some(display_offset);
+
         if should_blink_cursor
             && self
                 .last_cursor_origin
@@ -987,6 +1015,76 @@ impl TerminalView {
             opacity,
             cursor_animating || blink_animating,
         )
+    }
+
+    /// Advance the cursor animation for one animation-only frame and return
+    /// paint state. Unlike `next_cursor_frame` this never re-targets the
+    /// cursor or pauses blinking; the target was set at layout time.
+    pub(crate) fn tick_cursor_animation_frame(
+        &mut self,
+        fallback_origin: gpui::Point<Pixels>,
+        should_show_cursor: bool,
+        should_blink_cursor: bool,
+        cx: &mut Context<Self>,
+    ) -> (
+        gpui::Point<Pixels>,
+        Option<[gpui::Point<Pixels>; 4]>,
+        f32,
+        bool,
+    ) {
+        let cursor_animating = self.tick_cursor_animations();
+        let (origin, quad_corners) = if let Some(cursor) = self.quad_cursor.as_ref() {
+            (
+                cursor.visual_pos(),
+                Some(cursor.interpolated_corner_positions()),
+            )
+        } else {
+            (fallback_origin, None)
+        };
+
+        let blink_opacity = self
+            .blink_manager
+            .update(cx, |manager, _cx| manager.opacity());
+        let opacity = if !should_show_cursor {
+            0.0
+        } else if should_blink_cursor {
+            blink_opacity
+        } else {
+            1.0
+        };
+        let blink_animating =
+            should_blink_cursor && self.blink_manager.read(cx).is_smooth_blink_animating();
+
+        (
+            origin,
+            quad_corners,
+            opacity,
+            cursor_animating || blink_animating,
+        )
+    }
+
+    pub(crate) fn begin_cursor_animation_callback_cycle(&mut self) -> u64 {
+        self.cursor_animation_callback_generation =
+            self.cursor_animation_callback_generation.wrapping_add(1);
+        let generation = self.cursor_animation_callback_generation;
+        self.active_cursor_animation_callback_generation = Some(generation);
+        generation
+    }
+
+    pub(crate) fn is_active_cursor_animation_generation(&self, generation: u64) -> bool {
+        self.active_cursor_animation_callback_generation == Some(generation)
+    }
+
+    pub(crate) fn end_cursor_animation_callback_cycle(&mut self, generation: u64) {
+        if self.active_cursor_animation_callback_generation == Some(generation) {
+            self.active_cursor_animation_callback_generation = None;
+        }
+    }
+
+    /// Invalidate every pending cursor animation callback, regardless of
+    /// generation, so a stale callback cannot keep painting a ghost cursor.
+    pub(crate) fn cancel_cursor_animation_callbacks(&mut self) {
+        self.active_cursor_animation_callback_generation = None;
     }
 
     pub fn pause_cursor_blinking(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
