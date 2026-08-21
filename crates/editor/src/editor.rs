@@ -3250,6 +3250,13 @@ impl Editor {
         }
     }
 
+    /// Invalidate every pending cursor animation callback, regardless of
+    /// generation. Used when a layout pass produces no animation state, so a
+    /// stale callback cannot keep painting a ghost cursor.
+    pub fn cancel_cursor_animation_callbacks(&mut self) {
+        self.active_cursor_animation_callback_generation = None;
+    }
+
     fn build_inertial_cursor_config(
         settings: &editor_settings::SmoothCaret,
         cx: &App,

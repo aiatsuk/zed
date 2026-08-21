@@ -1210,6 +1210,10 @@ pub struct Window {
     animation_frame_requested: bool,
     animation_callbacks: Vec<Box<dyn FnOnce(&mut Window, &mut App) + 'static>>,
     cached_scene: Option<CachedScene>,
+    /// Index of the input-handler slot the platform window's handler was taken
+    /// from at the end of the last draw, so it can be restored into the same
+    /// slot and multi-slot vecs cannot drift.
+    taken_input_handler_index: Option<usize>,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -1902,6 +1906,7 @@ impl Window {
             animation_frame_requested: false,
             animation_callbacks: Vec::new(),
             cached_scene: None,
+            taken_input_handler_index: None,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -2928,11 +2933,21 @@ impl Window {
         self.requested_autoscroll = None;
 
         // Restore the previously-used input handler.
-        // Place it back into a None slot (left by a previous .take()) so that
-        // cached paint_range indices in reuse_paint find the handler at the
-        // expected position.
+        // Place it back into the exact slot it was taken from (recorded at the
+        // end of the last draw) so that cached paint_range indices in
+        // reuse_paint find the handler at the expected position; fall back to
+        // the last None slot only if that index is no longer available.
+        let taken_input_handler_index = self.taken_input_handler_index.take();
         if let Some(input_handler) = self.platform_window.take_input_handler() {
-            if let Some(slot) = self
+            let taken_slot = taken_input_handler_index.and_then(|index| {
+                self.rendered_frame
+                    .input_handlers
+                    .get_mut(index)
+                    .filter(|slot| slot.is_none())
+            });
+            if let Some(slot) = taken_slot {
+                *slot = Some(input_handler);
+            } else if let Some(slot) = self
                 .rendered_frame
                 .input_handlers
                 .iter_mut()
@@ -3017,13 +3032,17 @@ impl Window {
         // paint_range indices remain valid for reuse_paint on the next frame.
         // Search backwards to find the last Some entry, since reuse_paint may
         // have copied None slots from the previous frame. (Fixes #50456)
-        if let Some(input_handler) = self
+        // Remember which slot the handler came from so the restore above can
+        // put it back into the same position.
+        if let Some((index, input_handler)) = self
             .next_frame
             .input_handlers
             .iter_mut()
+            .enumerate()
             .rev()
-            .find_map(|h| h.take())
+            .find_map(|(index, handler)| handler.take().map(|handler| (index, handler)))
         {
+            self.taken_input_handler_index = Some(index);
             self.platform_window.set_input_handler(input_handler);
         }
 
@@ -5511,11 +5530,10 @@ impl Window {
             }
         }
 
-        // Skip dispatch if the tree hasn't been populated yet (before first frame)
-        if self.rendered_frame.dispatch_tree.is_empty() {
-            return;
-        }
-
+        // Before the first frame the dispatch tree is empty; drawing a dirty
+        // window below populates it so the keystroke is not lost. (The
+        // animation-only shortcut inside `draw` already requires a non-empty
+        // dispatch tree, so this always performs a full draw in that case.)
         if self.invalidator.is_dirty() {
             self.draw(cx).clear(cx);
         }

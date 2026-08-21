@@ -1235,6 +1235,7 @@ impl EditorElement {
                             font_size: cursor_row_layout.font_size,
                             block_text_color,
                             is_target_redacted,
+                            text_bounds: text_hitbox.bounds,
                             other_cursors: Vec::new(),
                         });
                     }
@@ -1264,8 +1265,13 @@ impl EditorElement {
         if is_animating && let Some(mut state) = animation_state {
             if let Some(newest_index) = newest_cursor_index {
                 let mut other_cursors = Vec::with_capacity(cursor_layouts.len().saturating_sub(1));
-                for (index, cursor) in cursor_layouts.into_iter().enumerate() {
+                for (index, mut cursor) in cursor_layouts.into_iter().enumerate() {
                     if index != newest_index {
+                        // `cursor_name` holds an arena-allocated `AnyElement`;
+                        // the element arena clears after this draw, so painting
+                        // it from a later animation-only frame would hit the
+                        // arena assert. Names reappear on the next full frame.
+                        cursor.cursor_name = None;
                         other_cursors.push(cursor);
                     }
                 }
@@ -1281,6 +1287,14 @@ impl EditorElement {
             window.request_animation_only_frame();
             window.on_animation_frame(move |window, cx| {
                 paint_cursor_animation_frame(state, window, cx);
+            });
+        } else {
+            // No animation callback repaints the cursor this frame. Invalidate
+            // any pending callback from a previous frame so it cannot keep
+            // painting a ghost cursor with stale scroll offset or opacity
+            // (e.g. after the editor blurred or the cursor scrolled offscreen).
+            self.editor.update(cx, |editor, _cx| {
+                editor.cancel_cursor_animation_callbacks();
             });
         }
 
@@ -10590,6 +10604,10 @@ struct CursorAnimationState {
     block_text_color: Hsla,
     /// Whether target position is in a redacted range
     is_target_redacted: bool,
+    /// Bounds of the editor's text area at layout time. All animation-frame
+    /// painting is clipped to these bounds so the cursor cannot draw over the
+    /// gutter, tab bar, or adjacent panes.
+    text_bounds: Bounds<Pixels>,
     /// Non-animated cursors from multi-selection that must be painted alongside the animated cursor.
     other_cursors: Vec<CursorLayout>,
 }
@@ -10683,21 +10701,6 @@ fn paint_cursor_animation_frame(
 
     let block_text = state.block_text.clone().or(fresh_block_text);
 
-    if cursor_animating
-        && destination_pos.is_some()
-        && block_text.is_some()
-        && let Some(destination_pos) = destination_pos
-    {
-        let destination_bounds = Bounds::new(
-            state.content_origin + destination_pos,
-            size(state.block_width, state.line_height),
-        );
-        window.paint_quad(fill(
-            destination_bounds,
-            cx.theme().colors().editor_background,
-        ));
-    }
-
     let mut cursor = CursorLayout {
         origin: cursor_origin,
         quad_corners: cursor_corners,
@@ -10709,11 +10712,32 @@ fn paint_cursor_animation_frame(
         block_text,
         cursor_name: None,
     };
-    cursor.paint(state.content_origin, window, cx);
 
-    for other in &mut state.other_cursors {
-        other.paint(state.content_origin, window, cx);
-    }
+    // Clip all animation painting to the editor's text area: the callback runs
+    // with the window's default (full) content mask, and the cursor must not
+    // draw over the gutter, tab bar, or adjacent panes.
+    let text_bounds = state.text_bounds;
+    window.with_content_mask(Some(ContentMask { bounds: text_bounds }), |window| {
+        if cursor_animating
+            && cursor.block_text.is_some()
+            && let Some(destination_pos) = destination_pos
+        {
+            let destination_bounds = Bounds::new(
+                state.content_origin + destination_pos,
+                size(state.block_width, state.line_height),
+            );
+            window.paint_quad(fill(
+                destination_bounds,
+                cx.theme().colors().editor_background,
+            ));
+        }
+
+        cursor.paint(state.content_origin, window, cx);
+
+        for other in &mut state.other_cursors {
+            other.paint(state.content_origin, window, cx);
+        }
+    });
 
     if !state
         .editor
